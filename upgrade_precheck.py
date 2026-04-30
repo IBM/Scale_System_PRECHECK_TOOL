@@ -713,6 +713,177 @@ class SystemHALCheckHealthChecker(HealthChecker):
             can_upgrade=False
         )
 
+class NodeTypeVersionHealthChecker(HealthChecker):
+    """Check node type and OS version compatibility for s6k nodes"""
+
+    def __init__(self, execution_context: ExecutionContext, cluster_nodes: Optional[Dict[str, str]] = None):
+        super().__init__(execution_context)
+        self.cluster_nodes = cluster_nodes or {}
+
+    @property
+    def component_name(self) -> str:
+        return "Node Type and OS Version Validation"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Validates that s6k nodes are running compatible RedHat versions. "
+            "s6k nodes must be running at least RedHat 9.4 for upgrade compatibility."
+        )
+
+    def check_health(self) -> HealthCheckResult:
+        """Check node type and OS version compatibility"""
+        return self._safe_execute(self._check_node_compatibility)
+
+    def _check_node_compatibility(self) -> HealthCheckResult:
+        """Validate s6k nodes are running compatible OS versions"""
+        executor = self._get_executor()
+        incompatible_nodes = []
+        details = {}
+        
+        try:
+            # Use the cluster_nodes passed during initialization
+            if not self.cluster_nodes:
+                return HealthCheckResult(
+                    component=self.component_name,
+                    status=HealthStatus.ERROR,
+                    message="No cluster nodes provided for validation",
+                    details={"error": "cluster_nodes is empty"},
+                    resolution="Ensure cluster nodes are properly detected",
+                    time_to_resolve="5 minutes",
+                    can_upgrade=False,
+                    execution_context=self.execution_context.name
+                )
+            
+            # Check each node
+            for short_name, full_name in self.cluster_nodes.items():
+                # Get node type
+                node_type = get_node_type(full_name, executor)
+                
+                if node_type == "s6k":
+                    # Check RedHat version for s6k nodes
+                    try:
+                        # Get OS release info
+                        os_result = executor.execute_command(
+                            "cat /etc/redhat-release",
+                            timeout=10
+                        )
+                        os_info = os_result.get('stdout', '').strip()
+                        
+                        # Extract version number (e.g., "9.2" from "Red Hat Enterprise Linux release 9.2")
+                        version = None
+                        major_version = None
+                        
+                        if "release" in os_info:
+                            version_part = os_info.split("release")[1].strip().split()[0]
+                            version = version_part
+                            major_version = version.split('.')[0]
+                        
+                        details[short_name] = {
+                            "node_type": node_type,
+                            "os_info": os_info,
+                            "version": version,
+                            "major_version": major_version
+                        }
+                        
+                        # Check if it's RedHat 9.2 (incompatible version)
+                        if major_version == "9" and version == "9.2":
+                            incompatible_nodes.append({
+                                "node": short_name,
+                                "node_type": node_type,
+                                "version": version,
+                                "os_info": os_info
+                            })
+                            logging.warning(
+                                "Node %s (type: %s) is running incompatible RedHat version %s",
+                                short_name, node_type, version
+                            )
+                        else:
+                            logging.info(
+                                "Node %s (type: %s) is running compatible RedHat version %s",
+                                short_name, node_type, version
+                            )
+                    
+                    except Exception as e:  # pylint: disable=broad-exception-caught
+                        logging.error("Failed to check OS version for node %s: %s", short_name, e)
+                        details[short_name] = {
+                            "node_type": node_type,
+                            "error": str(e)
+                        }
+            
+            # Generate result based on findings
+            if incompatible_nodes:
+                node_list = "\n".join([
+                    f"  - Node: {n['node']}, Type: {n['node_type']}, "
+                    f"RedHat Version: {n['version']}"
+                    for n in incompatible_nodes
+                ])
+                
+                flash_link = "https://www.ibm.com/support/pages/node/7266332"
+                
+                return HealthCheckResult(
+                    component=self.component_name,
+                    status=HealthStatus.CRITICAL,
+                    message=(
+                        f"Cannot perform this update. Detected {len(incompatible_nodes)} "
+                        f"s6k node(s) running incompatible RedHat version 9.2.\n"
+                        f"Incompatible nodes:\n{node_list}\n\n"
+                        f"⚠️  WARNING ISSUES (MONITOR AND PLAN)\n"
+                        f"It is not supported to upgrade from IBM Storage Scale System "
+                        f"6.1.9.4, 6.2.0.x, and 6.2.1.x (which run Red Hat Enterprise Linux 9.2) to "
+                        f"IBM Storage Scale System 6.2.3.3, 6.2.3.4, 7.0.0.0, and 7.0.0.1 (which run "
+                        f"RHEL 9.6). If you have an IBM Storage Scale System 6000 building-block in "
+                        f"the cluster with an affected release, (including unaffected nodes such as "
+                        f"IBM Storage Scale System 5000) you must perform an intermediate "
+                        f"upgrade, which is listed in the upgrade support matrix table.\n\n"
+                        f"Any Utility Node running Red Hat Enterprise Linux 9.2 is also impacted.\n\n"
+                        f"For more information about this restriction, see:\n"
+                        f"Nodes may kernel panic during OS upgrade from RHEL 9.2 to RHEL 9.6\n"
+                        f"{flash_link}"
+                    ),
+                    details={
+                        "incompatible_nodes": incompatible_nodes,
+                        "all_nodes_checked": details,
+                        "flash_link": flash_link
+                    },
+                    resolution=(
+                        "Upgrade all s6k nodes to RedHat 9.4 or later before proceeding "
+                        "with the system update. Contact IBM support for assistance."
+                    ),
+                    time_to_resolve="2-4 hours (OS upgrade required)",
+                    can_upgrade=False,
+                    execution_context=self.execution_context.name
+                )
+            
+            # All s6k nodes are compatible or no s6k nodes found
+            return HealthCheckResult(
+                component=self.component_name,
+                status=HealthStatus.HEALTHY,
+                message=(
+                    "All s6k nodes are running compatible RedHat versions "
+                    "(9.4 or later, or no s6k nodes with version 9.2 detected)."
+                ),
+                details={"nodes_checked": details},
+                resolution="No action required",
+                time_to_resolve="N/A",
+                can_upgrade=True,
+                execution_context=self.execution_context.name
+            )
+        
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logging.error("Error checking node compatibility: %s", e)
+            return HealthCheckResult(
+                component=self.component_name,
+                status=HealthStatus.ERROR,
+                message=f"Failed to check node compatibility: {str(e)}",
+                details={"error": str(e)},
+                resolution="Check system logs and ensure mmlscluster command is available",
+                time_to_resolve="5-10 minutes",
+                can_upgrade=False,
+                execution_context=self.execution_context.name
+            )
+
+
 class FirewallHealthChecker(HealthChecker):
     """Health checker for firewall status and required ports on cluster nodes."""
     
@@ -1271,6 +1442,7 @@ class HealthCheckManager:
         
         default_checkers = [
             GNRHealthChecker(ssh_context),
+            NodeTypeVersionHealthChecker(ssh_context, cluster_nodes=cluster_nodes),
             ESSStorageQuickCheckHealthChecker(ssh_context, node_list=io_nodes),
             FirewallHealthChecker(ssh_context, node_list=all_node_names),
         ]
