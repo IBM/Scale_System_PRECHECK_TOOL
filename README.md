@@ -12,9 +12,18 @@
 
 ## Pre-check Tool Execution
 
+**Important Note:** If you have an **EMS P9** or **BYOE with RHEL 8.8**, you must run the PRECHECK tool with **python3.11** instead of the default Python version.
+
+  ```shell
+  $  chmod +x upgrade_precheck.py
+  $  python3.11 upgrade_precheck.py
+  ```
+
+For other configurations, you can run the tool directly:
+
  ```shell
-  $  chmod +x upgrade_precheck.py 
-  $  ./upgrade_precheck.py 
+  $  chmod +x upgrade_precheck.py
+  $  ./upgrade_precheck.py
   ```
 
 ## Sample Pre-check execution snippet**
