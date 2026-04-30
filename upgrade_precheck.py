@@ -63,6 +63,65 @@ class HealthCheckResult:
             self.timestamp = datetime.now().isoformat()
 
 
+# Global constants for IO node types
+IO_NODE_TYPES = ["p9io", "p8io", "ess3k", "ess3200", "ess3500", "s6k"]
+
+
+def get_node_type(full_node_name: str, executor: 'RemoteExecutor') -> Optional[str]:
+    """
+    Get the node type for a given node using essgetconfig command.
+    
+    Args:
+        full_node_name: The full daemon node name (e.g., ess3500rw1a-hs.esstest.net)
+        executor: RemoteExecutor instance to execute the command
+        
+    Returns:
+        The node type string if found, None otherwise
+    """
+    try:
+        cmd = f"essgetconfig -N {full_node_name}"
+        result = executor.execute_command(cmd, timeout=30)
+        output = result.get('stdout', '')
+        
+        # Parse the JSON-like output to extract nodeType
+        for line in output.splitlines():
+            if '"nodeType":' in line:
+                # Extract the value between quotes after "nodeType":
+                node_type = line.split('"nodeType":')[1].strip().strip('",')
+                logging.info("Node %s has type: %s", full_node_name, node_type)
+                return node_type
+                
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning("Failed to get node type for %s: %s", full_node_name, e)
+    
+    return None
+
+
+def filter_io_nodes(nodes: Dict[str, str], executor: 'RemoteExecutor') -> List[str]:
+    """
+    Filter nodes to return only IO nodes.
+    
+    Args:
+        nodes: Dictionary mapping short node names to full daemon node names
+        executor: RemoteExecutor instance to execute commands
+        
+    Returns:
+        List of short node names that are IO nodes
+    """
+    io_nodes = []
+    
+    for short_name, full_name in nodes.items():
+        node_type = get_node_type(full_name, executor)
+        if node_type and node_type in IO_NODE_TYPES:
+            io_nodes.append(short_name)
+            logging.info("Node %s (%s) identified as IO node (type: %s)", short_name, full_name, node_type)
+        else:
+            logging.info("Node %s (%s) is not an IO node (type: %s)", short_name, full_name, node_type)
+    
+    logging.info("Filtered %d IO nodes from %d total nodes", len(io_nodes), len(nodes))
+    return io_nodes
+
+
 class RemoteExecutor:
     """Handles remote command execution for different contexts"""
 
@@ -253,7 +312,7 @@ class HealthChecker:
 
 
 class ESSStorageQuickCheckHealthChecker(HealthChecker):
-    """Health checker for ESS Storage Quick check."""
+    """Health checker for Storage Scale System Storage Quick check."""
     def __init__(
         self,
         execution_context: Optional[ExecutionContext] = None,
@@ -266,12 +325,12 @@ class ESSStorageQuickCheckHealthChecker(HealthChecker):
 
     @property
     def component_name(self) -> str:
-        return "ESS Storage Quick Check"
+        return "Storage Scale System Storage Quick Check"
 
     @property
     def description(self) -> str:
         return (
-            f"Runs the ESS Storage Quick Check script "
+            f"Runs the Storage Scale System Storage Quick Check script "
             f"({self.script_path}) across all cluster nodes and parses its output."
         )
 
@@ -373,7 +432,7 @@ class MMNetVerifyHealthChecker(HealthChecker):
 
     @property
     def component_name(self) -> str:
-        return "ESS Network (mmnetverify)"
+        return "Storage Scale System Network (mmnetverify)"
 
     @property
     def description(self) -> str:
@@ -441,7 +500,7 @@ class GNRHealthChecker(HealthChecker):
 
     @property
     def component_name(self) -> str:
-        return "ESS GNR Health (gnrhealthcheck)"
+        return "Storage Scale System GNR Health (gnrhealthcheck)"
 
     @property
     def description(self) -> str:
@@ -518,7 +577,7 @@ class GNRHealthChecker(HealthChecker):
 
 
 class MMHealthChecker(HealthChecker):
-    """Health checker for ESS nodes."""
+    """Health checker for Storage Scale System nodes."""
     def __init__(self, execution_context: Optional[ExecutionContext] = None):
         # Default using ssh unless specified
         if execution_context is None:
@@ -527,7 +586,7 @@ class MMHealthChecker(HealthChecker):
 
     @property
     def component_name(self) -> str:
-        return "ESS Node Health (mmhealth)"
+        return "Storage Scale System Node Health (mmhealth)"
 
     @property
     def description(self) -> str:
@@ -607,7 +666,7 @@ class SystemHALCheckHealthChecker(HealthChecker):
 
     @property
     def component_name(self) -> str:
-        return "ESS System HAL Check (system_check)"
+        return "Storage Scale System HAL Check (system_check)"
 
     @property
     def description(self) -> str:
@@ -654,6 +713,381 @@ class SystemHALCheckHealthChecker(HealthChecker):
             can_upgrade=False
         )
 
+class FirewallHealthChecker(HealthChecker):
+    """Health checker for firewall status and required ports on cluster nodes."""
+    
+    # Common ports required for IBM Spectrum Scale/Storage Scale System
+    # Format: (port_or_range, protocol, description)
+    # port_or_range can be an integer or a string like "8123-8127"
+    REQUIRED_PORTS = [
+        # TCP ports
+        (22, 'tcp', 'Secure Shell (SSH)'),
+        (873, 'tcp', 'rsync port'),
+        (1191, 'tcp', 'GPFS daemon and CCR intra‑cluster communication'),
+        (4739, 'tcp', 'Zimon'),
+        (51001, 'tcp', 'Cross HAL communication'),
+        (50052, 'tcp', 'gRPC (Native Rest API)'),
+        (46443, 'tcp', 'Native REST API (HTTPS)'),
+        (5353, 'tcp', 'mDNS (HAL)'),
+        (10080, 'tcp', 'Installation toolkit (http repository)'),
+        (20080, 'tcp', 'Storage Scale System repository'),
+        (9085, 'tcp', 'Performance monitoring'),
+        (9980, 'tcp', 'Performance monitoring'),
+        (80, 'tcp', 'HTTP (GUI)'),
+        (443, 'tcp', 'HTTPS (GUI)'),
+        (4444, 'tcp', 'GUI (localhost)'),
+        (657, 'tcp', 'HMC communication'),
+        ('60000-61000', 'tcp', 'GPFS ephemeral port range'),
+        (9981, 'tcp', 'Performance monitoring collector'),
+        (40443, 'tcp', 'GUI'),
+        # UDP ports
+        (5353, 'udp', 'mDNS (HAL)'),
+        (123, 'udp', 'NTP'),
+        (657, 'udp', 'HMC communication'),
+        (67, 'udp', 'DHCP'),
+        (623, 'udp', 'IPMI'),
+    ]
+    
+    @staticmethod
+    def _expand_port_range(port_or_range):
+        """Expand port range string to list of individual ports.
+        
+        Args:
+            port_or_range: Either an integer port or a string like "8123-8127"
+            
+        Returns:
+            List of individual port numbers
+        """
+        if isinstance(port_or_range, int):
+            return [port_or_range]
+        elif isinstance(port_or_range, str) and '-' in port_or_range:
+            start, end = map(int, port_or_range.split('-'))
+            return list(range(start, end + 1))
+        else:
+            return [int(port_or_range)]
+    
+    def __init__(self, execution_context: Optional[ExecutionContext] = None, node_list: Optional[List[str]] = None):
+        # Always use ssh context unless explicitly overridden
+        if execution_context is None:
+            execution_context = ExecutionContext(context_type='ssh')
+        super().__init__(execution_context)
+        self.node_list = node_list or []
+
+    @property
+    def component_name(self) -> str:
+        return "Firewall Status and Port Check"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Checks if firewall is running on cluster nodes and verifies "
+            "that required ports are open for IBM Storage System operation."
+        )
+
+    def check_health(self) -> HealthCheckResult:
+        return self._safe_execute(self._check_firewall)
+
+    def _check_firewall(self) -> HealthCheckResult:
+        """Check firewall status and port availability on all cluster nodes."""
+        all_results = {}
+        overall_status = HealthStatus.HEALTHY
+        issues = []
+        warnings = []
+        
+        # If no nodes specified, check local node only
+        nodes_to_check = self.node_list if self.node_list else ["localhost"]
+        
+        for node in nodes_to_check:
+            node_results = {
+                "firewall_running": False,
+                "firewall_service": "unknown",
+                "closed_ports": [],
+                "open_ports": [],
+                "check_errors": []
+            }
+            
+            # Check firewall status
+            firewall_status = self._check_firewall_status(node)
+            node_results["firewall_running"] = firewall_status["running"]
+            node_results["firewall_service"] = firewall_status["service"]
+            
+            if firewall_status.get("error"):
+                node_results["check_errors"].append(firewall_status["error"])
+            
+            # If firewall is running, check ports
+            if node_results["firewall_running"]:
+                port_results = self._check_ports(node, firewall_status["service"])
+                node_results["closed_ports"] = port_results["closed"]
+                node_results["open_ports"] = port_results["open"]
+                
+                if port_results.get("error"):
+                    node_results["check_errors"].append(port_results["error"])
+                
+                # Analyze results for this node
+                if node_results["closed_ports"]:
+                    overall_status = HealthStatus.CRITICAL
+                    issues.append(
+                        f"Node {node}: Firewall is blocking required ports: "
+                        f"{', '.join(map(str, node_results['closed_ports']))}"
+                    )
+            else:
+                # Firewall not running - this could be intentional
+                warnings.append(
+                    f"Node {node}: Firewall service ({firewall_status['service']}) is not running. "
+                    "This may be intentional in some environments."
+                )
+            
+            all_results[node] = node_results
+        
+        # Determine overall status and message
+        if overall_status == HealthStatus.CRITICAL:
+            # Extract node names from issues
+            affected_nodes = [node for node in all_results.keys() if all_results[node]["closed_ports"]]
+            nodes_str = ", ".join(affected_nodes)
+            
+            # Collect all unique closed ports across all nodes
+            all_closed_ports = set()
+            for node in affected_nodes:
+                all_closed_ports.update(all_results[node]["closed_ports"])
+            
+            # Sort and format closed ports for display
+            closed_ports_list = sorted(all_closed_ports)
+            ports_display = ", ".join(closed_ports_list)
+            
+            message = f"Firewall is blocking required ports on {len(issues)} node(s): {nodes_str}"
+            resolution = (
+                f"Open the required ports in the firewall configuration on nodes: {nodes_str}. "
+                "For firewalld: use 'firewall-cmd --permanent --add-port=<port>/tcp' (or /udp) and reload. "
+                "For iptables: add rules to allow the required ports for both TCP and UDP protocols. "
+                f"Blocked ports that need to be opened: {ports_display}"
+            )
+            time_to_resolve = "15-30 minutes"
+            can_upgrade = False
+        elif warnings:
+            overall_status = HealthStatus.WARNING
+            # Extract node names where firewall is not running
+            nodes_without_firewall = [node for node in all_results.keys() if not all_results[node]["firewall_running"]]
+            nodes_str = ", ".join(nodes_without_firewall)
+            message = f"Firewall is not running on {len(warnings)} node(s): {nodes_str}"
+            resolution = (
+                f"Verify if this is intentional on nodes: {nodes_str}. In production environments, "
+                "it's recommended to have firewall enabled with proper port configuration."
+            )
+            time_to_resolve = "Review required"
+            can_upgrade = True
+        else:
+            message = "Firewall configuration is correct on all nodes."
+            resolution = "No action required."
+            time_to_resolve = "N/A"
+            can_upgrade = True
+        
+        details = {
+            "nodes_checked": len(nodes_to_check),
+            "node_results": all_results,
+            "required_ports": self.REQUIRED_PORTS,
+            "issues": issues,
+            "warnings": warnings
+        }
+        
+        return HealthCheckResult(
+            component=self.component_name,
+            status=overall_status,
+            message=message,
+            details=details,
+            resolution=resolution,
+            time_to_resolve=time_to_resolve,
+            can_upgrade=can_upgrade,
+            execution_context=self.execution_context.name
+        )
+    
+    def _check_firewall_status(self, node: str) -> Dict[str, Any]:
+        """Check if firewall is running on a specific node."""
+        result = {
+            "running": False,
+            "service": "unknown",
+            "error": None
+        }
+        
+        # Build command based on node
+        if node == "localhost":
+            cmd_prefix = ""
+        else:
+            cmd_prefix = f"ssh -o StrictHostKeyChecking=no {node} "
+        
+        # Check for firewalld first (RHEL 7+)
+        cmd = f"{cmd_prefix}systemctl is-active firewalld"
+        check_result = self._execute_command(cmd, timeout=10)
+        
+        if check_result.get('returncode') == 0 and 'active' in check_result.get('stdout', '').lower():
+            result["running"] = True
+            result["service"] = "firewalld"
+            return result
+        
+        # Check for iptables
+        cmd = f"{cmd_prefix}systemctl is-active iptables"
+        check_result = self._execute_command(cmd, timeout=10)
+        
+        if check_result.get('returncode') == 0 and 'active' in check_result.get('stdout', '').lower():
+            result["running"] = True
+            result["service"] = "iptables"
+            return result
+        
+        # Check for ufw (Ubuntu/Debian)
+        cmd = f"{cmd_prefix}systemctl is-active ufw"
+        check_result = self._execute_command(cmd, timeout=10)
+        
+        if check_result.get('returncode') == 0 and 'active' in check_result.get('stdout', '').lower():
+            result["running"] = True
+            result["service"] = "ufw"
+            return result
+        
+        # If none are active, firewall is not running
+        result["service"] = "none"
+        return result
+    
+    def _check_ports(self, node: str, firewall_service: str) -> Dict[str, Any]:
+        """Check if required ports are open in the firewall."""
+        result = {
+            "open": [],
+            "closed": [],
+            "error": None
+        }
+        
+        # Build command prefix based on node
+        if node == "localhost":
+            cmd_prefix = ""
+        else:
+            cmd_prefix = f"ssh -o StrictHostKeyChecking=no {node} "
+        
+        if firewall_service == "firewalld":
+            # Check firewalld rules
+            cmd = f"{cmd_prefix}firewall-cmd --list-ports"
+            check_result = self._execute_command(cmd, timeout=15)
+            
+            if check_result.get('returncode') != 0:
+                result["error"] = f"Failed to query firewalld: {check_result.get('stderr', '')}"
+                return result
+            
+            open_ports_output = check_result.get('stdout', '')
+            
+            # Parse open ports (format: "1191/tcp 60000/udp 32767-32769/tcp ...")
+            open_ports = set()
+            for port_entry in open_ports_output.split():
+                if '/' in port_entry:
+                    try:
+                        port_part, protocol = port_entry.split('/')
+                        # Expand port ranges in firewall output
+                        ports = self._expand_port_range(port_part)
+                        for port_num in ports:
+                            open_ports.add((port_num, protocol))
+                    except ValueError:
+                        pass
+            
+            # Check each required port (expand ranges)
+            for port_or_range, protocol, desc in self.REQUIRED_PORTS:
+                ports_to_check = self._expand_port_range(port_or_range)
+                all_open = all((p, protocol) in open_ports for p in ports_to_check)
+                
+                if all_open:
+                    result["open"].append(f"{port_or_range}/{protocol}")
+                else:
+                    result["closed"].append(f"{port_or_range}/{protocol}")
+        
+        elif firewall_service == "iptables":
+            # Check iptables rules for both TCP and UDP
+            open_ports = set()
+            
+            # Check TCP rules
+            cmd = f"{cmd_prefix}iptables -L INPUT -n --line-numbers"
+            check_result = self._execute_command(cmd, timeout=15)
+            
+            if check_result.get('returncode') != 0:
+                result["error"] = f"Failed to query iptables: {check_result.get('stderr', '')}"
+                return result
+            
+            iptables_output = check_result.get('stdout', '')
+            
+            # Parse iptables output to find ACCEPT rules for TCP ports
+            for line in iptables_output.splitlines():
+                if 'ACCEPT' in line and 'tcp' in line.lower() and 'dpt:' in line:
+                    for part in line.split():
+                        if part.startswith('dpt:'):
+                            try:
+                                port_num = int(part.split(':')[1])
+                                open_ports.add((port_num, 'tcp'))
+                            except (ValueError, IndexError):
+                                pass
+            
+            # Check UDP rules
+            cmd = f"{cmd_prefix}iptables -L INPUT -n --line-numbers -t filter"
+            check_result = self._execute_command(cmd, timeout=15)
+            
+            if check_result.get('returncode') == 0:
+                iptables_output = check_result.get('stdout', '')
+                for line in iptables_output.splitlines():
+                    if 'ACCEPT' in line and 'udp' in line.lower() and 'dpt:' in line:
+                        for part in line.split():
+                            if part.startswith('dpt:'):
+                                try:
+                                    port_num = int(part.split(':')[1])
+                                    open_ports.add((port_num, 'udp'))
+                                except (ValueError, IndexError):
+                                    pass
+            
+            # Check each required port (expand ranges)
+            for port_or_range, protocol, desc in self.REQUIRED_PORTS:
+                ports_to_check = self._expand_port_range(port_or_range)
+                all_open = all((p, protocol) in open_ports for p in ports_to_check)
+                
+                if all_open:
+                    result["open"].append(f"{port_or_range}/{protocol}")
+                else:
+                    result["closed"].append(f"{port_or_range}/{protocol}")
+        
+        elif firewall_service == "ufw":
+            # Check ufw status
+            cmd = f"{cmd_prefix}ufw status numbered"
+            check_result = self._execute_command(cmd, timeout=15)
+            
+            if check_result.get('returncode') != 0:
+                result["error"] = f"Failed to query ufw: {check_result.get('stderr', '')}"
+                return result
+            
+            ufw_output = check_result.get('stdout', '')
+            
+            # Parse ufw output (format: "22/tcp ALLOW IN")
+            open_ports = set()
+            for line in ufw_output.splitlines():
+                if 'ALLOW' in line:
+                    parts = line.split()
+                    for part in parts:
+                        if '/' in part and any(proto in part.lower() for proto in ['tcp', 'udp']):
+                            try:
+                                port_proto = part.split('/')
+                                if len(port_proto) == 2:
+                                    port_num = int(port_proto[0])
+                                    protocol = port_proto[1].lower()
+                                    open_ports.add((port_num, protocol))
+                            except ValueError:
+                                pass
+                        elif part.isdigit():
+                            # If no protocol specified, assume both tcp and udp
+                            port_num = int(part)
+                            open_ports.add((port_num, 'tcp'))
+                            open_ports.add((port_num, 'udp'))
+            
+            # Check each required port (expand ranges)
+            for port_or_range, protocol, desc in self.REQUIRED_PORTS:
+                ports_to_check = self._expand_port_range(port_or_range)
+                all_open = all((p, protocol) in open_ports for p in ports_to_check)
+                
+                if all_open:
+                    result["open"].append(f"{port_or_range}/{protocol}")
+                else:
+                    result["closed"].append(f"{port_or_range}/{protocol}")
+        
+        return result
+
 
 class HealthCheckManager:
     """Manages and orchestrates health checks"""
@@ -689,14 +1123,19 @@ class HealthCheckManager:
         logging.root.addHandler(self.log_handler)
         logging.root.addHandler(console_handler)
 
-    def get_cluster_nodes(self, ssh_context: ExecutionContext) -> List[str]:
-        """Parse mmlscluster output to extract all node names"""
+    def get_cluster_nodes(self, ssh_context: ExecutionContext) -> Dict[str, str]:
+        """
+        Parse mmlscluster output to extract all node names.
+        
+        Returns:
+            Dictionary mapping short node names to full daemon node names
+        """
         try:
             executor = RemoteExecutor(ssh_context)
             result = executor.execute_command("mmlscluster", timeout=30)
             output = result.get('stdout', '')
             
-            nodes = []
+            nodes = {}
             in_node_section = False
             
             for line in output.splitlines():
@@ -717,18 +1156,18 @@ class HealthCheckManager:
                         daemon_node = parts[1]
                         # Remove -hs suffix if present and extract short name
                         short_name = daemon_node.split('-hs.')[0].split('.')[0]
-                        nodes.append(short_name)
+                        nodes[short_name] = daemon_node
                 
                 # Stop if we hit an empty line after starting node section
                 if in_node_section and not line.strip():
                     break
             
-            logging.info("Extracted %d nodes from mmlscluster: %s", len(nodes), ', '.join(nodes))
+            logging.info("Extracted %d nodes from mmlscluster: %s", len(nodes), ', '.join(nodes.keys()))
             return nodes
             
         except Exception as e:  # pylint: disable=broad-exception-caught
             logging.error("Failed to parse mmlscluster output: %s", e)
-            return []
+            return {}
 
     def detect_system_architecture(self, ssh_context: ExecutionContext) -> str:
         """Detect system architecture using uname -m"""
@@ -737,7 +1176,8 @@ class HealthCheckManager:
             result = executor.execute_command("uname -m", timeout=10)
             arch = result.get('stdout', '').strip()
             self.system_arch = arch
-            logging.info("Detected system architecture: %s", arch)
+            hostname = ssh_context.host if ssh_context.host else "localhost"
+            logging.info("Detected system architecture on %s: %s", hostname, arch)
             return arch
         except Exception as e:  # pylint: disable=broad-exception-caught
             logging.error("Failed to detect system architecture: %s", e)
@@ -750,7 +1190,8 @@ class HealthCheckManager:
             result = executor.execute_command("cat /proc/device-tree/model", timeout=10)
             model = result.get('stdout', '').strip()
             self.system_model = model
-            logging.info("Detected system model: %s", model)
+            hostname = ssh_context.host if ssh_context.host else "localhost"
+            logging.info("Detected system model on %s: %s", hostname, model)
             return model
         except Exception as e:  # pylint: disable=broad-exception-caught
             logging.error("Failed to detect system model: %s", e)
@@ -770,21 +1211,21 @@ class HealthCheckManager:
             return ""
 
     def is_ess_5000(self, ssh_context: ExecutionContext) -> bool:
-        """Check if the system is ESS 5000 (ppc64le with model 5105-22E)"""
+        """Check if the system is Storage Scale System 5000 (ppc64le with model 5105-22E)"""
         arch = self.detect_system_architecture(ssh_context)
         
         # Only check model if architecture is ppc64le
         if arch == "ppc64le":
             model = self.detect_system_model(ssh_context)
-            # Check if model starts with 5105-22E (ESS 5000)
+            # Check if model starts with 5105-22E (Storage Scale System 5000)
             if model.startswith("5105-22E"):
-                logging.info("Detected ESS 5000 system (ppc64le, model: %s)", model)
+                logging.info("Detected Storage Scale System 5000 (ppc64le, model: %s)", model)
                 return True
         
         return False
 
     def is_ems_BYOE(self, ssh_context: ExecutionContext) -> bool:
-        """Check if the system is ESS BYOE (x86 with model EMSVM)"""
+        """Check if the system is Storage Scale System BYOE (x86 with model EMSVM)"""
         arch = self.detect_system_architecture(ssh_context)
 
         # Only check model if architecture is ppc64le
@@ -792,7 +1233,7 @@ class HealthCheckManager:
             model = self.detect_system_model_x86(ssh_context)
             # Check if model is EMSVM (EMS BYOE)
             if model == "EMSVM":
-                logging.info("Detected ESS BYOE system (x86_64, model: %s)", model)
+                logging.info("Detected Storage Scale System BYOE (x86_64, model: %s)", model)
                 return True
 
         return False
@@ -804,32 +1245,42 @@ class HealthCheckManager:
             logging.info("Registered checker: %s", checker.component_name)
 
     def register_default_checkers(self, ssh_context):
-        """Register all default health checkers, conditionally skipping SystemHALCheckHealthChecker for ESS 5000."""
-        # Check if this is an ESS 5000 system
+        """Register all default health checkers, conditionally skipping SystemHALCheckHealthChecker for Storage Scale System 5000."""
+        # Check if this is a Storage Scale System 5000 system
         is_ess5000 = self.is_ess_5000(ssh_context)
        
         # Check if this is an BYOE system
         is_BYOE = self.is_ems_BYOE(ssh_context)
 
-        # Only add SystemHALCheckHealthChecker if NOT ESS 5000 or NOT BYOE
+        # Only add SystemHALCheckHealthChecker if NOT Storage Scale System 5000 or NOT BYOE
         hal_check = True
         if is_ess5000 or is_BYOE:
             hal_check = False
         
-        # Get cluster nodes for essstoragequickcheck
+        # Get cluster nodes (returns dict of short_name -> full_daemon_name)
         cluster_nodes = self.get_cluster_nodes(ssh_context)
+        
+        # Filter to get only IO nodes for essstoragequickcheck
+        executor = RemoteExecutor(ssh_context)
+        io_nodes = filter_io_nodes(cluster_nodes, executor)
+        
+        # Get list of all short node names for FirewallHealthChecker
+        all_node_names = list(cluster_nodes.keys())
+        
+        logging.info("Total cluster nodes: %d, IO nodes: %d", len(cluster_nodes), len(io_nodes))
         
         default_checkers = [
             GNRHealthChecker(ssh_context),
-            ESSStorageQuickCheckHealthChecker(ssh_context, node_list=cluster_nodes),
+            ESSStorageQuickCheckHealthChecker(ssh_context, node_list=io_nodes),
+            FirewallHealthChecker(ssh_context, node_list=all_node_names),
         ]
         
-        # Only add SystemHALCheckHealthChecker if NOT ESS 5000 or NOT BYOE
+        # Only add SystemHALCheckHealthChecker if NOT Storage Scale System 5000 or NOT BYOE
         if hal_check:
             default_checkers.insert(1, SystemHALCheckHealthChecker(ssh_context))
             logging.info("SystemHALCheckHealthChecker registered")
         else:
-            logging.info("Skipping SystemHALCheckHealthChecker for ESS 5000 system")
+            logging.info("Skipping SystemHALCheckHealthChecker for Storage Scale System 5000")
         
         for checker in default_checkers:
             self.register_checker(checker)
@@ -894,6 +1345,32 @@ class HealthCheckManager:
             f"  ✓ Healthy: {healthy}    ⚠ Warning: {warning}    "
             f"✗ Critical: {critical}    ⚠ Error: {error}"
         )
+        report.append("")
+
+        # Upgrade Matrix Information Banner with colors
+        # ANSI color codes
+        CYAN = "\033[96m"
+        YELLOW = "\033[93m"
+        GREEN = "\033[92m"
+        BLUE = "\033[94m"
+        BOLD = "\033[1m"
+        RESET = "\033[0m"
+        
+        report.append(f"{CYAN}{'=' * 120}{RESET}")
+        report.append(f"{BOLD}{YELLOW}📊 STORAGE SCALE UPGRADE MATRIX{RESET}")
+        report.append(f"{CYAN}{'=' * 120}{RESET}")
+        report.append(f"{BOLD}Planning to upgrade your Storage Scale System cluster?{RESET}")
+        report.append("Check the official upgrade path matrix and documentation for supported upgrade routes:")
+        report.append("")
+        report.append(f"{GREEN}🔗 Upgrade Matrix:{RESET} {BLUE}{BOLD}https://tanso.net/ESS-Upgrade-Path/{RESET}")
+        report.append(f"{GREEN}📚 Knowledge Center:{RESET} Refer to Storage Scale System Knowledge Center documentation for upgrade matrix")
+        report.append("")
+        report.append(f"{BOLD}These resources provide comprehensive information about:{RESET}")
+        report.append(f"  {YELLOW}•{RESET} Supported upgrade paths between versions")
+        report.append(f"  {YELLOW}•{RESET} Direct and multi-hop upgrade routes")
+        report.append(f"  {YELLOW}•{RESET} Version compatibility requirements")
+        report.append(f"  {YELLOW}•{RESET} Pre-upgrade and post-upgrade procedures")
+        report.append(f"{CYAN}{'=' * 120}{RESET}")
         report.append("")
 
         # Table header
@@ -1186,7 +1663,7 @@ def main():
                 if model:
                     print(f"System Model: {model}")
                     if model.startswith("5105-22E"):
-                        logging.debug("Detected: ESS 5000 - SystemHALCheckHealthChecker will be skipped")
+                        logging.debug("Detected: Storage Scale System 5000 - SystemHALCheckHealthChecker will be skipped")
             print()
         
         # Get cluster information
