@@ -62,6 +62,23 @@ The tool generates a comprehensive report showing:
 - Time estimates for resolving problems
 - Whether the system can proceed with upgrade
 
+## Security Advisories
+
+### ⚠️ CVE-2026-31431: Linux Kernel Crypto Subsystem Vulnerability
+
+**IBM Storage Scale System: Vulnerability in Linux kernel crypto subsystem could allow local privilege escalation**
+
+IBM Storage Scale Systems is affected by a security vulnerability identified in the Linux kernel's cryptographic interface (CVE-2026-31431) that could allow a local user with low privileges to escalate to root privileges. The vulnerability has a CVSS score of 7.8 (High) and requires local system access to exploit on RHEL 8 and 9.
+
+**Affected Products and Versions (RHEL 8 and RHEL 9 platforms only):**
+- IBM Storage Scale System 6.1.0.0 - 6.1.9.8
+- IBM Storage Scale System 6.2.0.0 - 6.2.3.5
+- IBM Storage Scale System 7.0.0.0 - 7.0.0.2
+
+**More Information:** https://www.ibm.com/support/pages/node/7272714
+
+---
+
 ## Prerequisites
 
 - Requires Python 3.10 or newer to run this tool

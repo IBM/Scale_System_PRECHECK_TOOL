@@ -1166,6 +1166,7 @@ class FirewallHealthChecker(HealthChecker):
         ('60000-61000', 'tcp', 'GPFS ephemeral port range'),
         (9981, 'tcp', 'Performance monitoring collector'),
         (40443, 'tcp', 'GUI'),
+        (51000, 'tcp', 'INTERLINK'),
         # UDP ports
         (5353, 'udp', 'mDNS (HAL)'),
         (123, 'udp', 'NTP'),
@@ -1283,8 +1284,7 @@ class FirewallHealthChecker(HealthChecker):
             message = f"Firewall is blocking required ports on {len(issues)} node(s): {nodes_str}"
             resolution = (
                 f"Open the required ports in the firewall configuration on nodes: {nodes_str}. "
-                "For firewalld: use 'firewall-cmd --permanent --add-port=<port>/tcp' (or /udp) and reload. "
-                "For iptables: add rules to allow the required ports for both TCP and UDP protocols. "
+                "Use 'essrun firewall enable' command to open all required ports. "
                 f"Blocked ports that need to be opened: {ports_display}"
             )
             time_to_resolve = "15-30 minutes"
@@ -1295,11 +1295,8 @@ class FirewallHealthChecker(HealthChecker):
             nodes_without_firewall = [node for node in all_results.keys() if not all_results[node]["firewall_running"]]
             nodes_str = ", ".join(nodes_without_firewall)
             message = f"Firewall is not running on {len(warnings)} node(s): {nodes_str}"
-            resolution = (
-                f"Verify if this is intentional on nodes: {nodes_str}. In production environments, "
-                "it's recommended to have firewall enabled with proper port configuration."
-            )
-            time_to_resolve = "Review required"
+            resolution = "No action required."
+            time_to_resolve = "N/A"
             can_upgrade = True
         else:
             message = "Firewall configuration is correct on all nodes."
@@ -1718,6 +1715,10 @@ class HealthCheckManager:
         self.results = []
 
         print("Starting comprehensive system health check...")
+        print("=" * 80)
+        print("\n⚠️  SECURITY ADVISORY: IBM Storage Scale System: Vulnerability in Linux kernel crypto")
+        print("    subsystem could allow local privilege escalation (CVE-2026-31431, RHEL 8/9)")
+        print("    Check if your system is impacted: https://www.ibm.com/support/pages/node/7272714")
         print("=" * 80)
 
         for i, checker in enumerate(self.checkers, 1):
