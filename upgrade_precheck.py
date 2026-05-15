@@ -88,7 +88,7 @@ def get_node_type(full_node_name: str, executor: 'RemoteExecutor') -> Optional[s
             if '"nodeType":' in line:
                 # Extract the value between quotes after "nodeType":
                 node_type = line.split('"nodeType":')[1].strip().strip('",')
-                logging.info("Node %s has type: %s", full_node_name, node_type)
+                logging.debug("Node %s has type: %s", full_node_name, node_type)
                 return node_type
                 
     except Exception as e:  # pylint: disable=broad-exception-caught
@@ -1057,7 +1057,7 @@ class NodeTypeVersionHealthChecker(HealthChecker):
                                 short_name, node_type, version
                             )
                         else:
-                            logging.info(
+                            logging.debug(
                                 "Node %s (type: %s) is running compatible RedHat version %s",
                                 short_name, node_type, version
                             )
