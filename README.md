@@ -1,5 +1,67 @@
 # IBM Storage Scale System Upgrade Pre-check Tool
 
+## Overview
+
+The upgrade_precheck tool is a standalone utility that performs comprehensive health checks on IBM Storage Scale System clusters. It can be run at any point in time to validate system health by checking critical components, configurations, and hardware health across all cluster nodes. While particularly useful before upgrades to ensure system readiness, it serves as a general health assessment tool for ongoing cluster monitoring and maintenance.
+
+### High-Level Checks Performed
+
+The tool executes the following health checks:
+
+1. **GNR Health Check (gnrhealthcheck)**
+   - Validates GNR health status
+   - Checks for enclosure and component issues
+   - Ensures hardware components are functioning properly
+
+2. **System HAL Check (system_check)** **
+   - Verifies system Hardware Abstraction Layer (HAL) health
+   - Runs `/opt/ibm/ess/hal/bin/system_check -c all`
+   - Validates system-level hardware components
+
+3. **Node Type and OS Version Validation**
+   - Validates node types across the cluster
+   - Checks OS version compatibility (especially for s6k nodes)
+   - Ensures s6k nodes are running at least RedHat 9.4
+
+4. **Storage Quick Check (essstoragequickcheck)**
+   - Runs comprehensive storage validation on IO nodes
+   - Checks storage adapters, enclosures, and drives
+   - Validates storage configuration and health
+
+5. **Storage Firmware Check**
+   - Verifies firmware versions on IO nodes
+   - Checks enclosure firmware level
+   - Uses `mmlsfirmware` command for validation
+
+6. **Firewall Status and Port Check**
+   - Validates firewall configuration on all cluster nodes
+   - Checks that required ports are open for cluster communication
+   - Verifies ports for SSH, GPFS, GUI, monitoring, and other services
+
+7. **Network Verification (mmnetverify)**
+   - Validates network configuration and connectivity
+   - Checks communication between all cluster nodes
+   - Runs `mmnetverify -N all` to verify network health
+
+8. **Node Health Check (mmhealth)**
+   - Checks overall health of all cluster nodes
+   - Identifies unhealthy components (DEGRADED, FAILED, CHECKING states)
+   - Runs `mmhealth node show --unhealthy -a`
+
+### Check Results
+
+Each check returns one of the following statuses:
+- **✓ HEALTHY**: Component is functioning properly, no action required
+- **⚠ WARNING**: Minor issues detected, should be addressed but not blocking
+- **✗ CRITICAL**: Serious issues found, must be resolved before upgrade
+- **⚠ ERROR**: Check failed to execute properly
+
+The tool generates a comprehensive report showing:
+- Summary of all checks with pass/fail status
+- Detailed resolution guidance for any issues found
+- Time estimates for resolving problems
+- Whether the system can proceed with upgrade
+
 ## Prerequisites
 
 - Requires Python 3.10 or newer to run this tool

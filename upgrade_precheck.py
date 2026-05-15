@@ -114,9 +114,9 @@ def filter_io_nodes(nodes: Dict[str, str], executor: 'RemoteExecutor') -> List[s
         node_type = get_node_type(full_name, executor)
         if node_type and node_type in IO_NODE_TYPES:
             io_nodes.append(short_name)
-            logging.info("Node %s (%s) identified as IO node (type: %s)", short_name, full_name, node_type)
+            logging.debug("Node %s (%s) identified as IO node (type: %s)", short_name, full_name, node_type)
         else:
-            logging.info("Node %s (%s) is not an IO node (type: %s)", short_name, full_name, node_type)
+            logging.debug("Node %s (%s) is not an IO node (type: %s)", short_name, full_name, node_type)
     
     logging.info("Filtered %d IO nodes from %d total nodes", len(io_nodes), len(nodes))
     return io_nodes
@@ -419,6 +419,264 @@ class ESSStorageQuickCheckHealthChecker(HealthChecker):
             time_to_resolve="5-30 minutes" if warnings or errors else "N/A",
             can_upgrade=status == HealthStatus.HEALTHY
         )
+
+class StorageFirmwareHealthChecker(HealthChecker):
+    """Health checker for storage firmware (adapters, enclosures, drives) on IO nodes."""
+    
+    def __init__(
+        self,
+        execution_context: Optional[ExecutionContext] = None,
+        node_list: Optional[List[str]] = None,
+        approved_items: Optional[Dict[str, Dict[str, str]]] = None
+    ):
+        super().__init__(execution_context)
+        self.node_list = node_list or []
+        # Default approved firmware lists (can be overridden)
+        self.approved_items = approved_items or {
+            #"adapter": {},
+            "enclosure": {},
+            #"drive": {}
+        }
+
+    @property
+    def component_name(self) -> str:
+        return "Storage Firmware Check"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Checks adapter, enclosure and drive firmware versions on IO nodes "
+            "using mmlsfirmware command."
+        )
+
+    def check_health(self) -> HealthCheckResult:
+        """Check storage firmware on all IO nodes"""
+        if not self.node_list:
+            return HealthCheckResult(
+                component=self.component_name,
+                status=HealthStatus.WARNING,
+                message="No IO nodes found to check",
+                details={"nodes": []},
+                resolution="Ensure IO nodes are properly configured in the cluster",
+                time_to_resolve="N/A",
+                can_upgrade=True
+            )
+
+        all_errors = []
+        all_warnings = []
+        all_ok = []
+        nodes_checked = []
+        nodes_failed = []
+        total_error_count = 0
+        total_warning_count = 0
+
+        for node in self.node_list:
+            #logging.info("Checking storage firmware on node: %s", node)
+            node_result = self._check_node_firmware(node)
+            
+            if node_result["status"] == "error":
+                nodes_failed.append(node)
+                all_errors.extend(node_result["errors"])
+                total_error_count += node_result.get("error_count", len(node_result["errors"]))
+            else:
+                nodes_checked.append(node)
+                all_errors.extend(node_result["errors"])
+                all_warnings.extend(node_result["warnings"])
+                all_ok.extend(node_result["ok"])
+                total_error_count += node_result.get("error_count", 0)
+                total_warning_count += node_result.get("warning_count", 0)
+
+        # Determine overall status
+        if all_errors:
+            status = HealthStatus.CRITICAL
+            message = f"Found {total_error_count} firmware error(s) across {len(nodes_checked)} node(s)"
+            can_upgrade = False
+        elif all_warnings:
+            status = HealthStatus.WARNING
+            message = f"Found {total_warning_count} firmware warning(s) across {len(nodes_checked)} node(s)"
+            can_upgrade = True
+        elif nodes_checked:
+            status = HealthStatus.HEALTHY
+            message = f"All storage firmware checks passed on {len(nodes_checked)} node(s)"
+            can_upgrade = True
+        else:
+            status = HealthStatus.ERROR
+            message = f"Failed to check firmware on all {len(nodes_failed)} node(s)"
+            can_upgrade = False
+
+        details = {
+            "nodes_checked": nodes_checked,
+            "nodes_failed": nodes_failed,
+            "total_errors": total_error_count,
+            "total_warnings": total_warning_count,
+            "errors": all_errors[:10],  # Limit to first 10
+            "warnings": all_warnings[:10],  # Limit to first 10
+            "ok_items": all_ok[:10]  # Limit to first 10
+        }
+
+        # Build resolution message with firmware information
+        resolution_parts = []
+        
+        if all_errors:
+            resolution_parts.append("Critical firmware issues detected:")
+            resolution_parts.extend(f"  - {err}" for err in all_errors)
+            resolution_parts.append("\nUpdate firmware to approved versions before upgrade.")
+        
+        if all_warnings:
+            if resolution_parts:
+                resolution_parts.append("")
+            resolution_parts.append("Firmware warnings detected:")
+            resolution_parts.extend(f"  - {warn}" for warn in all_warnings)
+            resolution_parts.append("\nReview and consider updating firmware.")
+        
+        if not resolution_parts:
+            resolution = "No firmware information available."
+        else:
+            resolution = "\n".join(resolution_parts)
+
+        return HealthCheckResult(
+            component=self.component_name,
+            status=status,
+            message=message,
+            details=details,
+            resolution=resolution,
+            time_to_resolve="30-120 minutes" if all_errors or all_warnings else "N/A",
+            can_upgrade=can_upgrade
+        )
+
+    def _check_node_firmware(self, node: str) -> Dict[str, Any]:
+        """Check firmware on a single node"""
+        errors = []
+        warnings = []
+        ok_items = []
+        error_count = 0
+        warning_count = 0
+        
+        # Create a node-specific execution context to run command locally on the node
+        node_context = ExecutionContext(
+            context_type='ssh',
+            name=node,
+            host=node,
+            port=self.execution_context.port if self.execution_context else 22,
+            username=self.execution_context.username if self.execution_context else None,
+            password=self.execution_context.password if self.execution_context else None,
+            key_file=self.execution_context.key_file if self.execution_context else None
+        )
+        
+        # Build mmlsfirmware command - run locally on the node (no -N option)
+        cmd = "/usr/lpp/mmfs/bin/mmlsfirmware --type storage-enclosure -Y"
+        
+        # Execute command on the specific node
+        node_executor = RemoteExecutor(node_context)
+        result = node_executor.execute_command(cmd, timeout=120)
+        rc = result.get('returncode', -1)
+        output = result.get('stdout', '')
+        stderr = result.get('stderr', '')
+        
+        if rc != 0:
+            error_msg = f"Node {node}: Failed to run mmlsfirmware (rc={rc})"
+            if stderr:
+                error_msg += f" - {stderr}"
+            return {
+                "status": "error",
+                "errors": [error_msg],
+                "warnings": [],
+                "ok": [],
+                "error_count": 1,
+                "warning_count": 0
+            }
+        
+        # Collect unique items with their firmware info and count
+        # Key: (item_type, item_name, item_fw, expected_fw)
+        # Value: count
+        unique_items = {}
+        
+        # Parse mmlsfirmware output
+        for line in output.splitlines():
+            line = line.strip()
+            if not line or "HEADER" in line:
+                continue
+            
+            # Parse YAML-like output from mmlsfirmware -Y
+            parts = line.split(":")
+            if len(parts) < 11:
+                continue
+            
+            item_type = None
+            #if "adapter" in line:
+            #    item_type = "adapter"
+            if "enclosure" in line and "drive" not in line:
+                item_type = "enclosure"
+            #elif "drive" in line:
+            #    item_type = "drive"
+            
+            if not item_type:
+                continue
+            
+            try:
+                item_name = parts[6].strip()
+                item_fw = parts[8].strip().replace('cli=', '')
+                available_fw = parts[10].strip().replace('cli=', '').lstrip('*')
+                
+                # Handle URL-encoded characters in enclosure names
+                if item_type == "enclosure" and "%" in item_name:
+                    item_name = item_name.replace("%2D", "-").replace("%2d", "-")
+                
+                # Create unique key for this item
+                item_key = (item_type, item_name, item_fw, available_fw)
+                unique_items[item_key] = unique_items.get(item_key, 0) + 1
+                
+            except (IndexError, ValueError) as e:
+                logging.warning("Failed to parse firmware line: %s - %s", line, e)
+                continue
+        
+        # Now process unique items and generate messages
+        for (item_type, item_name, item_fw, available_fw), count in unique_items.items():
+            # Compare installed firmware against available firmware from mmlsfirmware
+            if available_fw:
+                expected_fw = available_fw
+                
+                # Special handling for enclosures (may have dual firmware)
+                if item_type == "enclosure" and "," in item_fw:
+                    current_levels = [fw.strip() for fw in item_fw.split(",") if fw.strip()]
+                    if current_levels and all(fw == expected_fw for fw in current_levels):
+                        ok_items.append(
+                            f"Node {node}: OK: {item_type.capitalize()} {item_name} firmware: "
+                            f"found {item_fw} expected {expected_fw}, {item_type} count: {count}"
+                        )
+                    else:
+                        errors.append(
+                            f"Node {node}: ERROR: {item_type.capitalize()} {item_name} firmware: "
+                            f"found {item_fw} expected {expected_fw}, {item_type} count: {count}"
+                        )
+                        error_count += count
+                else:
+                    if item_fw == expected_fw:
+                        ok_items.append(
+                            f"Node {node}: OK: {item_type.capitalize()} {item_name} firmware: "
+                            f"found {item_fw} expected {expected_fw}, {item_type} count: {count}"
+                        )
+                    else:
+                        errors.append(
+                            f"Node {node}: ERROR: {item_type.capitalize()} {item_name} firmware: "
+                            f"found {item_fw} expected {expected_fw}, {item_type} count: {count}"
+                        )
+                        error_count += count
+            else:
+                ok_items.append(
+                    f"Node {node}: OK: {item_type.capitalize()} {item_name} firmware: "
+                    f"found {item_fw}, {item_type} count: {count}"
+                )
+        
+        return {
+            "status": "ok",
+            "errors": errors,
+            "warnings": warnings,
+            "ok": ok_items,
+            "error_count": error_count,
+            "warning_count": warning_count
+        }
+
 
 
 class MMNetVerifyHealthChecker(HealthChecker):
@@ -859,10 +1117,7 @@ class NodeTypeVersionHealthChecker(HealthChecker):
             return HealthCheckResult(
                 component=self.component_name,
                 status=HealthStatus.HEALTHY,
-                message=(
-                    "All s6k nodes are running compatible RedHat versions "
-                    "(9.4 or later, or no s6k nodes with version 9.2 detected)."
-                ),
+                message="",
                 details={"nodes_checked": details},
                 resolution="No action required",
                 time_to_resolve="N/A",
@@ -1348,7 +1603,7 @@ class HealthCheckManager:
             arch = result.get('stdout', '').strip()
             self.system_arch = arch
             hostname = ssh_context.host if ssh_context.host else "localhost"
-            logging.info("Detected system architecture on %s: %s", hostname, arch)
+            logging.debug("Detected system architecture on %s: %s", hostname, arch)
             return arch
         except Exception as e:  # pylint: disable=broad-exception-caught
             logging.error("Failed to detect system architecture: %s", e)
@@ -1362,7 +1617,7 @@ class HealthCheckManager:
             model = result.get('stdout', '').strip()
             self.system_model = model
             hostname = ssh_context.host if ssh_context.host else "localhost"
-            logging.info("Detected system model on %s: %s", hostname, model)
+            logging.debug("Detected system model on %s: %s", hostname, model)
             return model
         except Exception as e:  # pylint: disable=broad-exception-caught
             logging.error("Failed to detect system model: %s", e)
@@ -1375,7 +1630,7 @@ class HealthCheckManager:
             result = executor.execute_command("dmidecode -s system-product-name", timeout=10)
             model = result.get('stdout', '').strip()
             self.system_model = model
-            logging.info("Detected system model: %s", model)
+            logging.debug("Detected system model: %s", model)
             return model
         except Exception as e:  # pylint: disable=broad-exception-caught
             logging.error("Failed to detect system model: %s", e)
@@ -1413,7 +1668,7 @@ class HealthCheckManager:
         """Register a health checker"""
         if checker.enabled:
             self.checkers.append(checker)
-            logging.info("Registered checker: %s", checker.component_name)
+            logging.debug("Registered checker: %s", checker.component_name)
 
     def register_default_checkers(self, ssh_context):
         """Register all default health checkers, conditionally skipping SystemHALCheckHealthChecker for Storage Scale System 5000."""
@@ -1444,15 +1699,16 @@ class HealthCheckManager:
             GNRHealthChecker(ssh_context),
             NodeTypeVersionHealthChecker(ssh_context, cluster_nodes=cluster_nodes),
             ESSStorageQuickCheckHealthChecker(ssh_context, node_list=io_nodes),
+            StorageFirmwareHealthChecker(ssh_context, node_list=io_nodes),
             FirewallHealthChecker(ssh_context, node_list=all_node_names),
         ]
         
         # Only add SystemHALCheckHealthChecker if NOT Storage Scale System 5000 or NOT BYOE
         if hal_check:
             default_checkers.insert(1, SystemHALCheckHealthChecker(ssh_context))
-            logging.info("SystemHALCheckHealthChecker registered")
+            logging.debug("SystemHALCheckHealthChecker registered")
         else:
-            logging.info("Skipping SystemHALCheckHealthChecker for Storage Scale System 5000")
+            logging.debug("Skipping SystemHALCheckHealthChecker for Storage Scale System 5000")
         
         for checker in default_checkers:
             self.register_checker(checker)
@@ -1465,7 +1721,10 @@ class HealthCheckManager:
         print("=" * 80)
 
         for i, checker in enumerate(self.checkers, 1):
-            print(f"[{i}/{len(self.checkers)}] Checking {checker.component_name}...", end=" ")
+            if "Storage Firmware" in checker.component_name:
+                print(f"[{i}/{len(self.checkers)}] Running storage firmware checks, may take a long time...", end=" ")
+            else:
+                print(f"[{i}/{len(self.checkers)}] Checking {checker.component_name}...", end=" ")
 
             start_time = time.time()
             result = checker.check_health()
@@ -1519,32 +1778,6 @@ class HealthCheckManager:
         )
         report.append("")
 
-        # Upgrade Matrix Information Banner with colors
-        # ANSI color codes
-        CYAN = "\033[96m"
-        YELLOW = "\033[93m"
-        GREEN = "\033[92m"
-        BLUE = "\033[94m"
-        BOLD = "\033[1m"
-        RESET = "\033[0m"
-        
-        report.append(f"{CYAN}{'=' * 120}{RESET}")
-        report.append(f"{BOLD}{YELLOW}📊 STORAGE SCALE UPGRADE MATRIX{RESET}")
-        report.append(f"{CYAN}{'=' * 120}{RESET}")
-        report.append(f"{BOLD}Planning to upgrade your Storage Scale System cluster?{RESET}")
-        report.append("Check the official upgrade path matrix and documentation for supported upgrade routes:")
-        report.append("")
-        report.append(f"{GREEN}🔗 Upgrade Matrix:{RESET} {BLUE}{BOLD}https://tanso.net/ESS-Upgrade-Path/{RESET}")
-        report.append(f"{GREEN}📚 Knowledge Center:{RESET} Refer to Storage Scale System Knowledge Center documentation for upgrade matrix")
-        report.append("")
-        report.append(f"{BOLD}These resources provide comprehensive information about:{RESET}")
-        report.append(f"  {YELLOW}•{RESET} Supported upgrade paths between versions")
-        report.append(f"  {YELLOW}•{RESET} Direct and multi-hop upgrade routes")
-        report.append(f"  {YELLOW}•{RESET} Version compatibility requirements")
-        report.append(f"  {YELLOW}•{RESET} Pre-upgrade and post-upgrade procedures")
-        report.append(f"{CYAN}{'=' * 120}{RESET}")
-        report.append("")
-
         # Table header
         report.append("COMPONENT HEALTH STATUS")
         report.append("=" * 120)
@@ -1582,6 +1815,76 @@ class HealthCheckManager:
 
         report.append("-" * 120)
         report.append("")
+
+        # Upgrade Matrix Information Banner with colors
+        # ANSI color codes
+        CYAN = "\033[96m"
+        YELLOW = "\033[93m"
+        GREEN = "\033[92m"
+        BLUE = "\033[94m"
+        BOLD = "\033[1m"
+        RESET = "\033[0m"
+        
+        report.append(f"{CYAN}{'=' * 120}{RESET}")
+        report.append(f"{BOLD}{YELLOW}📊 STORAGE SCALE UPGRADE MATRIX{RESET}")
+        report.append(f"{CYAN}{'=' * 120}{RESET}")
+        report.append(f"{BOLD}Planning to upgrade your Storage Scale System cluster?{RESET}")
+        report.append("Check the official upgrade path matrix and documentation for supported upgrade routes:")
+        report.append("")
+        report.append(f"{GREEN}🔗 Upgrade Matrix:{RESET} {BLUE}{BOLD}https://tanso.net/ESS-Upgrade-Path/{RESET}")
+        report.append(f"{GREEN}📚 Knowledge Center:{RESET} Refer to Storage Scale System Knowledge Center documentation for upgrade matrix")
+        report.append("")
+        report.append(f"{BOLD}These resources provide comprehensive information about:{RESET}")
+        report.append(f"  {YELLOW}•{RESET} Supported upgrade paths between versions")
+        report.append(f"  {YELLOW}•{RESET} Direct and multi-hop upgrade routes")
+        report.append(f"  {YELLOW}•{RESET} Version compatibility requirements")
+        report.append(f"  {YELLOW}•{RESET} Pre-upgrade and post-upgrade procedures")
+        report.append(f"{CYAN}{'=' * 120}{RESET}")
+        report.append("")
+
+        # Firmware Information section - always display, grouped by node
+        firmware_results = [r for r in self.results if r.component == "Storage Firmware Check"]
+        if firmware_results:
+            report.append(f"{CYAN}{'=' * 60}{RESET}")
+            report.append(f"{BOLD}{YELLOW}📋 FIRMWARE INFORMATION{RESET}")
+            report.append(f"{CYAN}{'=' * 60}{RESET}")
+            
+            # Collect all firmware items grouped by node
+            node_firmware = {}
+            
+            for result in firmware_results:
+                # Process ok_items
+                if result.details and 'ok_items' in result.details:
+                    for item in result.details['ok_items']:
+                        # Extract node name from the item string
+                        if item.startswith("Node "):
+                            parts = item.split(":", 1)
+                            if len(parts) == 2:
+                                node_name = parts[0].replace("Node ", "").strip()
+                                firmware_info = parts[1].strip()
+                                if node_name not in node_firmware:
+                                    node_firmware[node_name] = []
+                                node_firmware[node_name].append(firmware_info)
+                
+                # Process errors
+                if result.details and 'errors' in result.details:
+                    for error in result.details['errors']:
+                        # Extract node name from the error string
+                        if error.startswith("Node "):
+                            parts = error.split(":", 1)
+                            if len(parts) == 2:
+                                node_name = parts[0].replace("Node ", "").strip()
+                                firmware_info = parts[1].strip()
+                                if node_name not in node_firmware:
+                                    node_firmware[node_name] = []
+                                node_firmware[node_name].append(firmware_info)
+            
+            # Display firmware information grouped by node
+            for node_name in sorted(node_firmware.keys()):
+                report.append(f"Node {node_name}:")
+                for firmware_info in node_firmware[node_name]:
+                    report.append(f"  {firmware_info}")
+                report.append("")
 
         # Detailed resolution section
         report.append("DETAILED RESOLUTION GUIDE")
@@ -1885,3 +2188,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
