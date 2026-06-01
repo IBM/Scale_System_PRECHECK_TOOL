@@ -1175,6 +1175,51 @@ class FirewallHealthChecker(HealthChecker):
         (623, 'udp', 'IPMI'),
     ]
     
+    # Ports that should be closed for security (not required for IBM Storage Scale System)
+    # These ports are commonly found open but are not in REQUIRED_PORTS
+    # Format: (port_or_range, protocol, description)
+    CLOSED_PORTS = [
+        # TCP ports that can be closed
+        (8889, 'tcp', 'Unnecessary port - can be closed'),
+        (123, 'tcp', 'NTP TCP (only UDP needed) - can be closed'),
+        (8080, 'tcp', 'Alternative HTTP - can be closed'),
+        (35357, 'tcp', 'OpenStack Keystone admin - can be closed'),
+        (5000, 'tcp', 'OpenStack Keystone - can be closed'),
+        (5431, 'tcp', 'PostgreSQL alternative - can be closed'),
+        ('6200-6203', 'tcp', 'Unnecessary port range - can be closed'),
+        (11211, 'tcp', 'Memcached - can be closed'),
+        ('8123-8127', 'tcp', 'Unnecessary port range - can be closed'),
+        (9094, 'tcp', 'Unnecessary port - can be closed'),
+        (8085, 'tcp', 'Unnecessary port - can be closed'),
+        (1500, 'tcp', 'Unnecessary port - can be closed'),
+        (5024, 'tcp', 'Unnecessary port - can be closed'),
+        (3001, 'tcp', 'Unnecessary port - can be closed'),
+        (3002, 'tcp', 'Unnecessary port - can be closed'),
+        (67, 'tcp', 'DHCP TCP (only UDP needed) - can be closed'),
+        (68, 'tcp', 'DHCP client - can be closed'),
+        (69, 'tcp', 'TFTP TCP - can be closed'),
+        (514, 'tcp', 'Syslog TCP - can be closed'),
+        (782, 'tcp', 'Unnecessary port - can be closed'),
+        (4011, 'tcp', 'PXE boot - can be closed'),
+        (623, 'tcp', 'IPMI TCP (only UDP needed) - can be closed'),
+        (162, 'tcp', 'SNMP trap - can be closed'),
+        # UDP ports that can be closed
+        (22, 'udp', 'SSH UDP (only TCP needed) - can be closed'),
+        (5431, 'udp', 'PostgreSQL alternative UDP - can be closed'),
+        (11211, 'udp', 'Memcached UDP - can be closed'),
+        (80, 'udp', 'HTTP UDP (only TCP needed) - can be closed'),
+        (4739, 'udp', 'Zimon UDP (only TCP needed) - can be closed'),
+        (20080, 'udp', 'Repository UDP (only TCP needed) - can be closed'),
+        (10080, 'udp', 'Installation toolkit UDP (only TCP needed) - can be closed'),
+        (3001, 'udp', 'Unnecessary port - can be closed'),
+        (3002, 'udp', 'Unnecessary port - can be closed'),
+        (873, 'udp', 'rsync UDP (only TCP needed) - can be closed'),
+        (69, 'udp', 'TFTP - can be closed'),
+        (514, 'udp', 'Syslog UDP - can be closed'),
+        (162, 'udp', 'SNMP trap UDP - can be closed'),
+        (7, 'udp', 'Echo service - can be closed'),
+    ]
+    
     @staticmethod
     def _expand_port_range(port_or_range):
         """Expand port range string to list of individual ports.
@@ -1230,6 +1275,7 @@ class FirewallHealthChecker(HealthChecker):
                 "firewall_service": "unknown",
                 "closed_ports": [],
                 "open_ports": [],
+                "unnecessary_open_ports": [],
                 "check_errors": []
             }
             
@@ -1249,6 +1295,21 @@ class FirewallHealthChecker(HealthChecker):
                 
                 if port_results.get("error"):
                     node_results["check_errors"].append(port_results["error"])
+                
+                # Check for unnecessary open ports
+                unnecessary_results = self._check_unnecessary_ports(node, firewall_status["service"])
+                node_results["unnecessary_open_ports"] = unnecessary_results["unnecessary_open"]
+                
+                if unnecessary_results.get("error"):
+                    node_results["check_errors"].append(unnecessary_results["error"])
+                
+                # Add warnings for unnecessary open ports
+                if node_results["unnecessary_open_ports"]:
+                    for port_info in node_results["unnecessary_open_ports"]:
+                        warnings.append(
+                            f"Node {node}: Unnecessary port {port_info['port']} is open - {port_info['description']}. "
+                            f"To close: {port_info['close_command']}"
+                        )
                 
                 # Analyze results for this node
                 if node_results["closed_ports"]:
@@ -1290,13 +1351,29 @@ class FirewallHealthChecker(HealthChecker):
             time_to_resolve = "15-30 minutes"
             can_upgrade = False
         elif warnings:
-            overall_status = HealthStatus.WARNING
-            # Extract node names where firewall is not running
-            nodes_without_firewall = [node for node in all_results.keys() if not all_results[node]["firewall_running"]]
-            nodes_str = ", ".join(nodes_without_firewall)
-            message = f"Firewall is not running on {len(warnings)} node(s): {nodes_str}"
-            resolution = "No action required."
-            time_to_resolve = "N/A"
+            # Check if warnings are about unnecessary ports or firewall not running
+            # Only include nodes with unnecessary ports if firewall is actually running
+            nodes_with_unnecessary_ports = [node for node in all_results.keys()
+                                           if all_results[node]["firewall_running"]
+                                           and all_results[node].get("unnecessary_open_ports")]
+            nodes_without_firewall = [node for node in all_results.keys()
+                                     if not all_results[node]["firewall_running"]]
+            
+            if overall_status != HealthStatus.WARNING:
+                overall_status = HealthStatus.WARNING
+            
+            if nodes_with_unnecessary_ports and nodes_without_firewall:
+                message = (f"Firewall is not running on {len(nodes_without_firewall)} node(s) and "
+                          f"{len(nodes_with_unnecessary_ports)} node(s) have unnecessary open ports")
+            elif nodes_with_unnecessary_ports:
+                nodes_str = ", ".join(nodes_with_unnecessary_ports)
+                message = f"Found unnecessary open ports on {len(nodes_with_unnecessary_ports)} node(s): {nodes_str}"
+            else:
+                nodes_str = ", ".join(nodes_without_firewall)
+                message = f"Firewall is not running on {len(nodes_without_firewall)} node(s): {nodes_str}"
+            
+            resolution = "Review warnings for details. Close unnecessary ports using the provided firewall-cmd commands."
+            time_to_resolve = "5-10 minutes"
             can_upgrade = True
         else:
             message = "Firewall configuration is correct on all nodes."
@@ -1308,6 +1385,7 @@ class FirewallHealthChecker(HealthChecker):
             "nodes_checked": len(nodes_to_check),
             "node_results": all_results,
             "required_ports": self.REQUIRED_PORTS,
+            "closed_ports_list": self.CLOSED_PORTS,
             "issues": issues,
             "warnings": warnings
         }
@@ -1366,6 +1444,149 @@ class FirewallHealthChecker(HealthChecker):
         
         # If none are active, firewall is not running
         result["service"] = "none"
+        return result
+    
+    def _check_unnecessary_ports(self, node: str, firewall_service: str) -> Dict[str, Any]:
+        """Check if any unnecessary ports (from CLOSED_PORTS) are open in the firewall."""
+        result = {
+            "unnecessary_open": [],
+            "error": None
+        }
+        
+        # Build command prefix based on node
+        if node == "localhost":
+            cmd_prefix = ""
+        else:
+            cmd_prefix = f"ssh -o StrictHostKeyChecking=no {node} "
+        
+        if firewall_service == "firewalld":
+            # Check firewalld rules
+            cmd = f"{cmd_prefix}firewall-cmd --list-ports"
+            check_result = self._execute_command(cmd, timeout=15)
+            
+            if check_result.get('returncode') != 0:
+                result["error"] = f"Failed to query firewalld: {check_result.get('stderr', '')}"
+                return result
+            
+            open_ports_output = check_result.get('stdout', '')
+            
+            # Parse open ports (format: "1191/tcp 60000/udp 32767-32769/tcp ...")
+            open_ports = set()
+            for port_entry in open_ports_output.split():
+                if '/' in port_entry:
+                    try:
+                        port_part, protocol = port_entry.split('/')
+                        # Expand port ranges in firewall output
+                        ports = self._expand_port_range(port_part)
+                        for port_num in ports:
+                            open_ports.add((port_num, protocol))
+                    except ValueError:
+                        pass
+            
+            # Check each port in CLOSED_PORTS to see if it's unnecessarily open
+            for port_or_range, protocol, desc in self.CLOSED_PORTS:
+                ports_to_check = self._expand_port_range(port_or_range)
+                for port_num in ports_to_check:
+                    if (port_num, protocol) in open_ports:
+                        result["unnecessary_open"].append({
+                            "port": f"{port_or_range}/{protocol}",
+                            "description": desc,
+                            "close_command": f"firewall-cmd --permanent --remove-port={port_or_range}/{protocol} && firewall-cmd --reload"
+                        })
+                        break  # Only add once per port_or_range
+        
+        elif firewall_service == "iptables":
+            # Check iptables rules for both TCP and UDP
+            open_ports = set()
+            
+            # Check TCP rules
+            cmd = f"{cmd_prefix}iptables -L INPUT -n --line-numbers"
+            check_result = self._execute_command(cmd, timeout=15)
+            
+            if check_result.get('returncode') != 0:
+                result["error"] = f"Failed to query iptables: {check_result.get('stderr', '')}"
+                return result
+            
+            iptables_output = check_result.get('stdout', '')
+            
+            # Parse iptables output to find ACCEPT rules for TCP ports
+            for line in iptables_output.splitlines():
+                if 'ACCEPT' in line and 'tcp' in line.lower() and 'dpt:' in line:
+                    for part in line.split():
+                        if part.startswith('dpt:'):
+                            try:
+                                port_num = int(part.split(':')[1])
+                                open_ports.add((port_num, 'tcp'))
+                            except (ValueError, IndexError):
+                                pass
+            
+            # Check UDP rules
+            cmd = f"{cmd_prefix}iptables -L INPUT -n --line-numbers -t filter"
+            check_result = self._execute_command(cmd, timeout=15)
+            
+            if check_result.get('returncode') == 0:
+                iptables_output = check_result.get('stdout', '')
+                for line in iptables_output.splitlines():
+                    if 'ACCEPT' in line and 'udp' in line.lower() and 'dpt:' in line:
+                        for part in line.split():
+                            if part.startswith('dpt:'):
+                                try:
+                                    port_num = int(part.split(':')[1])
+                                    open_ports.add((port_num, 'udp'))
+                                except (ValueError, IndexError):
+                                    pass
+            
+            # Check each port in CLOSED_PORTS to see if it's unnecessarily open
+            for port_or_range, protocol, desc in self.CLOSED_PORTS:
+                ports_to_check = self._expand_port_range(port_or_range)
+                for port_num in ports_to_check:
+                    if (port_num, protocol) in open_ports:
+                        result["unnecessary_open"].append({
+                            "port": f"{port_or_range}/{protocol}",
+                            "description": desc,
+                            "close_command": f"iptables -D INPUT -p {protocol} --dport {port_num} -j ACCEPT"
+                        })
+                        break  # Only add once per port_or_range
+        
+        elif firewall_service == "ufw":
+            # Check ufw status
+            cmd = f"{cmd_prefix}ufw status numbered"
+            check_result = self._execute_command(cmd, timeout=15)
+            
+            if check_result.get('returncode') != 0:
+                result["error"] = f"Failed to query ufw: {check_result.get('stderr', '')}"
+                return result
+            
+            ufw_output = check_result.get('stdout', '')
+            
+            # Parse ufw output (format: "22/tcp ALLOW IN")
+            open_ports = set()
+            for line in ufw_output.splitlines():
+                if 'ALLOW' in line:
+                    parts = line.split()
+                    for part in parts:
+                        if '/' in part and any(proto in part.lower() for proto in ['tcp', 'udp']):
+                            try:
+                                port_proto = part.split('/')
+                                if len(port_proto) == 2:
+                                    port_num = int(port_proto[0])
+                                    protocol = port_proto[1].lower()
+                                    open_ports.add((port_num, protocol))
+                            except ValueError:
+                                pass
+            
+            # Check each port in CLOSED_PORTS to see if it's unnecessarily open
+            for port_or_range, protocol, desc in self.CLOSED_PORTS:
+                ports_to_check = self._expand_port_range(port_or_range)
+                for port_num in ports_to_check:
+                    if (port_num, protocol) in open_ports:
+                        result["unnecessary_open"].append({
+                            "port": f"{port_or_range}/{protocol}",
+                            "description": desc,
+                            "close_command": f"ufw delete allow {port_num}/{protocol}"
+                        })
+                        break  # Only add once per port_or_range
+        
         return result
     
     def _check_ports(self, node: str, firewall_service: str) -> Dict[str, Any]:
@@ -1907,6 +2128,56 @@ class HealthCheckManager:
                 report.append(f"  Time: {result.time_to_resolve}")
                 if result.upgrade_info:
                     report.append(f"  Upgrade: {result.upgrade_info}")
+                
+                # Add detailed unnecessary ports information for Firewall checks
+                if result.component == "Firewall Status and Port Check":
+                    if result.details and 'node_results' in result.details:
+                        has_unnecessary = False
+                        for node_name, node_data in result.details['node_results'].items():
+                            if node_data.get('unnecessary_open_ports'):
+                                has_unnecessary = True
+                                break
+                        
+                        if has_unnecessary:
+                            report.append("")
+                            report.append("  " + "=" * 60)
+                            report.append("  WARNING: Unnecessary Firewall Ports Open")
+                            report.append("  " + "=" * 60)
+                            report.append("  The following ports are currently open but are not required for this node type.")
+                            report.append("  These ports can be closed for better security.")
+                            report.append("")
+                            
+                            # Collect all unnecessary ports grouped by node and protocol
+                            for node_name, node_data in result.details['node_results'].items():
+                                unnecessary_ports = node_data.get('unnecessary_open_ports', [])
+                                if unnecessary_ports:
+                                    # Separate TCP and UDP ports
+                                    tcp_ports = []
+                                    udp_ports = []
+                                    for port_info in unnecessary_ports:
+                                        port = port_info['port']
+                                        if '/tcp' in port:
+                                            tcp_ports.append(port)
+                                        elif '/udp' in port:
+                                            udp_ports.append(port)
+                                    
+                                    report.append(f"  Node {node_name}:")
+                                    if tcp_ports:
+                                        report.append(f"  Unnecessary TCP ports: {', '.join(tcp_ports)}")
+                                    if udp_ports:
+                                        report.append(f"  Unnecessary UDP ports: {', '.join(udp_ports)}")
+                                    report.append("")
+                            
+                            report.append("  RECOMMENDED ACTION:")
+                            report.append("  You can close these ports using the following firewall-cmd commands:")
+                            report.append("")
+                            report.append("    firewall-cmd --permanent --remove-port=<PORT>")
+                            report.append("    firewall-cmd --reload")
+                            report.append("")
+                            report.append("  Example:")
+                            report.append("    firewall-cmd --permanent --remove-port=8889/tcp")
+                            report.append("    firewall-cmd --reload")
+                
                 report.append("")
 
         if warning_issues:
@@ -1920,6 +2191,56 @@ class HealthCheckManager:
                 report.append(f"  Time: {result.time_to_resolve}")
                 if result.upgrade_info:
                     report.append(f"  Upgrade: {result.upgrade_info}")
+                
+                # Add detailed unnecessary ports information for Firewall checks
+                if result.component == "Firewall Status and Port Check":
+                    if result.details and 'node_results' in result.details:
+                        has_unnecessary = False
+                        for node_name, node_data in result.details['node_results'].items():
+                            if node_data.get('unnecessary_open_ports'):
+                                has_unnecessary = True
+                                break
+                        
+                        if has_unnecessary:
+                            report.append("")
+                            report.append("  " + "=" * 60)
+                            report.append("  WARNING: Unnecessary Firewall Ports Open")
+                            report.append("  " + "=" * 60)
+                            report.append("  The following ports are currently open but are not required for this node type.")
+                            report.append("  These ports can be closed for better security.")
+                            report.append("")
+                            
+                            # Collect all unnecessary ports grouped by node and protocol
+                            for node_name, node_data in result.details['node_results'].items():
+                                unnecessary_ports = node_data.get('unnecessary_open_ports', [])
+                                if unnecessary_ports:
+                                    # Separate TCP and UDP ports
+                                    tcp_ports = []
+                                    udp_ports = []
+                                    for port_info in unnecessary_ports:
+                                        port = port_info['port']
+                                        if '/tcp' in port:
+                                            tcp_ports.append(port)
+                                        elif '/udp' in port:
+                                            udp_ports.append(port)
+                                    
+                                    report.append(f"  Node {node_name}:")
+                                    if tcp_ports:
+                                        report.append(f"  Unnecessary TCP ports: {', '.join(tcp_ports)}")
+                                    if udp_ports:
+                                        report.append(f"  Unnecessary UDP ports: {', '.join(udp_ports)}")
+                                    report.append("")
+                            
+                            report.append("  RECOMMENDED ACTION:")
+                            report.append("  You can close these ports using the following firewall-cmd commands:")
+                            report.append("")
+                            report.append("    firewall-cmd --permanent --remove-port=<PORT>")
+                            report.append("    firewall-cmd --reload")
+                            report.append("")
+                            report.append("  Example:")
+                            report.append("    firewall-cmd --permanent --remove-port=8889/tcp")
+                            report.append("    firewall-cmd --reload")
+                
                 report.append("")
 
         if error_issues:
