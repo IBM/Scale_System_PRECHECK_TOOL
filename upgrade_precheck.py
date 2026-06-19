@@ -15,6 +15,30 @@ from datetime import datetime
 import sys
 
 
+# ============================================================================
+# GLOBAL TIMEOUT CONFIGURATION
+# ============================================================================
+# Adjust these values if commands are timing out on your system.
+# All timeouts are in seconds.
+
+# Default timeout for quick commands (e.g., uname, cat, systemctl status)
+DEFAULT_TIMEOUT = 30
+
+# Timeout for short commands (e.g., firewall checks, simple queries)
+SHORT_TIMEOUT = 60
+
+# Timeout for medium commands (e.g., mmhealth, mmnetverify)
+MEDIUM_TIMEOUT = 120
+
+# Timeout for long commands (e.g., essstoragequickcheck, gnrhealthcheck)
+LONG_TIMEOUT = 300
+
+# Timeout for very long commands (e.g., mmlsfirmware on systems with many enclosures)
+VERY_LONG_TIMEOUT = 600
+
+# ============================================================================
+
+
 class HealthStatus(Enum):
     """Health check status levels"""
     HEALTHY = "HEALTHY"
@@ -80,7 +104,7 @@ def get_node_type(full_node_name: str, executor: 'RemoteExecutor') -> Optional[s
     """
     try:
         cmd = f"essgetconfig -N {full_node_name}"
-        result = executor.execute_command(cmd, timeout=30)
+        result = executor.execute_command(cmd, timeout=DEFAULT_TIMEOUT)
         output = result.get('stdout', '')
         
         # Parse the JSON-like output to extract nodeType
@@ -193,10 +217,13 @@ class RemoteExecutor:
             if self.context.password:
                 ssh_cmd_parts.extend(['sshpass', '-p', self.context.password])
 
-            # Add SSH command
+            # Add SSH command with connection timeout options
             ssh_cmd_parts.extend([
                 'ssh',
                 '-o', 'StrictHostKeyChecking=no',
+                '-o', 'ConnectTimeout=30',
+                '-o', 'ServerAliveInterval=10',
+                '-o', 'ServerAliveCountMax=3',
                 '-p', str(self.context.port)
             ])
 
@@ -342,7 +369,7 @@ class ESSStorageQuickCheckHealthChecker(HealthChecker):
         else:
             cmd = self.script_path
         
-        result = self._execute_command(cmd, timeout=300)  # Increased timeout for multiple nodes
+        result = self._execute_command(cmd, timeout=LONG_TIMEOUT)
         output = result.get('stdout', '')
         error = result.get('stderr', '')
         rc = result.get('returncode', -1)
@@ -567,8 +594,9 @@ class StorageFirmwareHealthChecker(HealthChecker):
         cmd = "/usr/lpp/mmfs/bin/mmlsfirmware --type storage-enclosure -Y"
         
         # Execute command on the specific node
+        # Increased timeout to 600 seconds (10 minutes) for older systems with many enclosures
         node_executor = RemoteExecutor(node_context)
-        result = node_executor.execute_command(cmd, timeout=120)
+        result = node_executor.execute_command(cmd, timeout=VERY_LONG_TIMEOUT)
         rc = result.get('returncode', -1)
         output = result.get('stdout', '')
         stderr = result.get('stderr', '')
@@ -702,7 +730,7 @@ class MMNetVerifyHealthChecker(HealthChecker):
     def _check_mmnetverify(self) -> HealthCheckResult:
         mmnetverify_path = "/usr/lpp/mmfs/bin/mmnetverify"
         cmd = f"{mmnetverify_path} -N all"
-        result = self._execute_command(command=cmd, timeout=60)
+        result = self._execute_command(command=cmd, timeout=SHORT_TIMEOUT)
         output = result.get('stdout', '')
         error = result.get('stderr', '')
         rc = result.get('returncode', -1)
@@ -769,7 +797,7 @@ class GNRHealthChecker(HealthChecker):
 
     def _check_gnrhealth(self) -> HealthCheckResult:  # pylint: disable=too-many-locals
         gnrhealth_path = "/usr/lpp/mmfs/bin/gnrhealthcheck"
-        result = self._execute_command(gnrhealth_path, timeout=600)
+        result = self._execute_command(gnrhealth_path, timeout=VERY_LONG_TIMEOUT)
         output = result.get('stdout', '')
         error = result.get('stderr', '')
         rc = result.get('returncode', -1)
@@ -856,7 +884,7 @@ class MMHealthChecker(HealthChecker):
     def _check_mmhealth(self) -> HealthCheckResult:  # pylint: disable=too-many-locals
         mmhealth_path = "/usr/lpp/mmfs/bin/mmhealth"
         cmd = f"{mmhealth_path} node show --unhealthy -a"
-        result = self._execute_command(cmd, timeout=60)
+        result = self._execute_command(cmd, timeout=SHORT_TIMEOUT)
         output = result.get('stdout', '')
         error = result.get('stderr', '')
         rc = result.get('returncode', -1)
@@ -939,7 +967,7 @@ class SystemHALCheckHealthChecker(HealthChecker):
     def _check_systemhal(self) -> HealthCheckResult:
         system_check_path = "/opt/ibm/ess/hal/bin/system_check"
         cmd = f"{system_check_path} -c all"
-        result = self._execute_command(cmd, timeout=120)
+        result = self._execute_command(cmd, timeout=MEDIUM_TIMEOUT)
         output = result.get('stdout', '')
         error = result.get('stderr', '')
         rc = result.get('returncode', -1)
@@ -1024,7 +1052,7 @@ class NodeTypeVersionHealthChecker(HealthChecker):
                         # Get OS release info
                         os_result = executor.execute_command(
                             "cat /etc/redhat-release",
-                            timeout=10
+                            timeout=DEFAULT_TIMEOUT
                         )
                         os_info = os_result.get('stdout', '').strip()
                         
@@ -1419,7 +1447,7 @@ class FirewallHealthChecker(HealthChecker):
         
         # Check for firewalld first (RHEL 7+)
         cmd = f"{cmd_prefix}systemctl is-active firewalld"
-        check_result = self._execute_command(cmd, timeout=10)
+        check_result = self._execute_command(cmd, timeout=DEFAULT_TIMEOUT)
         
         if check_result.get('returncode') == 0 and 'active' in check_result.get('stdout', '').lower():
             result["running"] = True
@@ -1428,7 +1456,7 @@ class FirewallHealthChecker(HealthChecker):
         
         # Check for iptables
         cmd = f"{cmd_prefix}systemctl is-active iptables"
-        check_result = self._execute_command(cmd, timeout=10)
+        check_result = self._execute_command(cmd, timeout=DEFAULT_TIMEOUT)
         
         if check_result.get('returncode') == 0 and 'active' in check_result.get('stdout', '').lower():
             result["running"] = True
@@ -1437,7 +1465,7 @@ class FirewallHealthChecker(HealthChecker):
         
         # Check for ufw (Ubuntu/Debian)
         cmd = f"{cmd_prefix}systemctl is-active ufw"
-        check_result = self._execute_command(cmd, timeout=10)
+        check_result = self._execute_command(cmd, timeout=DEFAULT_TIMEOUT)
         
         if check_result.get('returncode') == 0 and 'active' in check_result.get('stdout', '').lower():
             result["running"] = True
@@ -1464,7 +1492,7 @@ class FirewallHealthChecker(HealthChecker):
         if firewall_service == "firewalld":
             # Check firewalld rules
             cmd = f"{cmd_prefix}firewall-cmd --list-ports"
-            check_result = self._execute_command(cmd, timeout=15)
+            check_result = self._execute_command(cmd, timeout=DEFAULT_TIMEOUT)
             
             if check_result.get('returncode') != 0:
                 result["error"] = f"Failed to query firewalld: {check_result.get('stderr', '')}"
@@ -1503,7 +1531,7 @@ class FirewallHealthChecker(HealthChecker):
             
             # Check TCP rules
             cmd = f"{cmd_prefix}iptables -L INPUT -n --line-numbers"
-            check_result = self._execute_command(cmd, timeout=15)
+            check_result = self._execute_command(cmd, timeout=DEFAULT_TIMEOUT)
             
             if check_result.get('returncode') != 0:
                 result["error"] = f"Failed to query iptables: {check_result.get('stderr', '')}"
@@ -1524,7 +1552,7 @@ class FirewallHealthChecker(HealthChecker):
             
             # Check UDP rules
             cmd = f"{cmd_prefix}iptables -L INPUT -n --line-numbers -t filter"
-            check_result = self._execute_command(cmd, timeout=15)
+            check_result = self._execute_command(cmd, timeout=DEFAULT_TIMEOUT)
             
             if check_result.get('returncode') == 0:
                 iptables_output = check_result.get('stdout', '')
@@ -1553,7 +1581,7 @@ class FirewallHealthChecker(HealthChecker):
         elif firewall_service == "ufw":
             # Check ufw status
             cmd = f"{cmd_prefix}ufw status numbered"
-            check_result = self._execute_command(cmd, timeout=15)
+            check_result = self._execute_command(cmd, timeout=DEFAULT_TIMEOUT)
             
             if check_result.get('returncode') != 0:
                 result["error"] = f"Failed to query ufw: {check_result.get('stderr', '')}"
@@ -1608,7 +1636,7 @@ class FirewallHealthChecker(HealthChecker):
         if firewall_service == "firewalld":
             # Check firewalld rules
             cmd = f"{cmd_prefix}firewall-cmd --list-ports"
-            check_result = self._execute_command(cmd, timeout=15)
+            check_result = self._execute_command(cmd, timeout=DEFAULT_TIMEOUT)
             
             if check_result.get('returncode') != 0:
                 result["error"] = f"Failed to query firewalld: {check_result.get('stderr', '')}"
@@ -1645,7 +1673,7 @@ class FirewallHealthChecker(HealthChecker):
             
             # Check TCP rules
             cmd = f"{cmd_prefix}iptables -L INPUT -n --line-numbers"
-            check_result = self._execute_command(cmd, timeout=15)
+            check_result = self._execute_command(cmd, timeout=DEFAULT_TIMEOUT)
             
             if check_result.get('returncode') != 0:
                 result["error"] = f"Failed to query iptables: {check_result.get('stderr', '')}"
@@ -1666,7 +1694,7 @@ class FirewallHealthChecker(HealthChecker):
             
             # Check UDP rules
             cmd = f"{cmd_prefix}iptables -L INPUT -n --line-numbers -t filter"
-            check_result = self._execute_command(cmd, timeout=15)
+            check_result = self._execute_command(cmd, timeout=DEFAULT_TIMEOUT)
             
             if check_result.get('returncode') == 0:
                 iptables_output = check_result.get('stdout', '')
@@ -1693,7 +1721,7 @@ class FirewallHealthChecker(HealthChecker):
         elif firewall_service == "ufw":
             # Check ufw status
             cmd = f"{cmd_prefix}ufw status numbered"
-            check_result = self._execute_command(cmd, timeout=15)
+            check_result = self._execute_command(cmd, timeout=DEFAULT_TIMEOUT)
             
             if check_result.get('returncode') != 0:
                 result["error"] = f"Failed to query ufw: {check_result.get('stderr', '')}"
@@ -1778,7 +1806,7 @@ class HealthCheckManager:
         """
         try:
             executor = RemoteExecutor(ssh_context)
-            result = executor.execute_command("mmlscluster", timeout=30)
+            result = executor.execute_command("mmlscluster", timeout=DEFAULT_TIMEOUT)
             output = result.get('stdout', '')
             
             nodes = {}
@@ -1819,7 +1847,7 @@ class HealthCheckManager:
         """Detect system architecture using uname -m"""
         try:
             executor = RemoteExecutor(ssh_context)
-            result = executor.execute_command("uname -m", timeout=10)
+            result = executor.execute_command("uname -m", timeout=DEFAULT_TIMEOUT)
             arch = result.get('stdout', '').strip()
             self.system_arch = arch
             hostname = ssh_context.host if ssh_context.host else "localhost"
@@ -1833,7 +1861,7 @@ class HealthCheckManager:
         """Detect system model from /proc/device-tree/model (for ppc64le)"""
         try:
             executor = RemoteExecutor(ssh_context)
-            result = executor.execute_command("cat /proc/device-tree/model", timeout=10)
+            result = executor.execute_command("cat /proc/device-tree/model", timeout=DEFAULT_TIMEOUT)
             model = result.get('stdout', '').strip()
             self.system_model = model
             hostname = ssh_context.host if ssh_context.host else "localhost"
@@ -1847,7 +1875,7 @@ class HealthCheckManager:
         """Detect system model from dmidecode (for x86)"""
         try:
             executor = RemoteExecutor(ssh_context)
-            result = executor.execute_command("dmidecode -s system-product-name", timeout=10)
+            result = executor.execute_command("dmidecode -s system-product-name", timeout=DEFAULT_TIMEOUT)
             model = result.get('stdout', '').strip()
             self.system_model = model
             logging.debug("Detected system model: %s", model)
@@ -2442,7 +2470,7 @@ def main():
         executor = RemoteExecutor(ssh_context)
         
         # Get system architecture
-        uname_result = executor.execute_command("uname -a", timeout=10)
+        uname_result = executor.execute_command("uname -a", timeout=DEFAULT_TIMEOUT)
         uname_out = uname_result.get('stdout', '').strip()
         if uname_out:
             print("System Information (uname -a):")
@@ -2450,14 +2478,14 @@ def main():
             print()
         
         # Get architecture
-        arch_result = executor.execute_command("uname -m", timeout=10)
+        arch_result = executor.execute_command("uname -m", timeout=DEFAULT_TIMEOUT)
         arch = arch_result.get('stdout', '').strip()
         if arch:
             print(f"Architecture: {arch}")
             
             # If ppc64le, get the model
             if arch == "ppc64le":
-                model_result = executor.execute_command("cat /proc/device-tree/model", timeout=10)
+                model_result = executor.execute_command("cat /proc/device-tree/model", timeout=DEFAULT_TIMEOUT)
                 model = model_result.get('stdout', '').strip()
                 if model:
                     print(f"System Model: {model}")
@@ -2466,7 +2494,7 @@ def main():
             print()
         
         # Get cluster information
-        mmlscluster_result = executor.execute_command("mmlscluster", timeout=30)
+        mmlscluster_result = executor.execute_command("mmlscluster", timeout=DEFAULT_TIMEOUT)
         mmlscluster_out = mmlscluster_result.get('stdout', '').strip()
         mmlscluster_err = mmlscluster_result.get('stderr', '').strip()
         
