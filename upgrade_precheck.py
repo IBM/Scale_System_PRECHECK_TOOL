@@ -1164,15 +1164,12 @@ class FirewallHealthChecker(HealthChecker):
         (4444, 'tcp', 'GUI (localhost)'),
         (657, 'tcp', 'HMC communication'),
         ('60000-61000', 'tcp', 'GPFS ephemeral port range'),
-        (9981, 'tcp', 'Performance monitoring collector'),
         (40443, 'tcp', 'GUI'),
         (51000, 'tcp', 'INTERLINK'),
         # UDP ports
         (5353, 'udp', 'mDNS (HAL)'),
         (123, 'udp', 'NTP'),
         (657, 'udp', 'HMC communication'),
-        (67, 'udp', 'DHCP'),
-        (623, 'udp', 'IPMI'),
     ]
     
     # Ports that should be closed for security (not required for IBM Storage Scale System)
@@ -1203,6 +1200,8 @@ class FirewallHealthChecker(HealthChecker):
         (4011, 'tcp', 'PXE boot - can be closed'),
         (623, 'tcp', 'IPMI TCP (only UDP needed) - can be closed'),
         (162, 'tcp', 'SNMP trap - can be closed'),
+        (9084, 'tcp', 'can be closed'),
+        (9981, 'tcp', 'can be closed'),
         # UDP ports that can be closed
         (22, 'udp', 'SSH UDP (only TCP needed) - can be closed'),
         (5431, 'udp', 'PostgreSQL alternative UDP - can be closed'),
@@ -1218,6 +1217,9 @@ class FirewallHealthChecker(HealthChecker):
         (514, 'udp', 'Syslog UDP - can be closed'),
         (162, 'udp', 'SNMP trap UDP - can be closed'),
         (7, 'udp', 'Echo service - can be closed'),
+        (67, 'udp', 'DHCP'),
+        (623, 'udp', 'IPMI'),
+        (2049, 'udp', 'closed'),
     ]
     
     @staticmethod
