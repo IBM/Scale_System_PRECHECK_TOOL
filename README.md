@@ -105,6 +105,74 @@ For other configurations, you can run the tool directly:
   $  ./upgrade_precheck.py
   ```
 
+## Timeout Configuration
+
+If you experience timeout errors during health checks (especially on older systems or systems with many storage enclosures), you can adjust the timeout values in the script.
+
+### Common Timeout Errors
+
+You may see errors like:
+```
+Node ionode-01: Failed to run mmlsfirmware (rc=-1) - SSH command timed out
+```
+
+### How to Adjust Timeouts
+
+1. Open `upgrade_precheck.py` in a text editor
+2. Locate the **GLOBAL TIMEOUT CONFIGURATION** section at the top of the file (around lines 18-32)
+3. Adjust the timeout values as needed:
+
+```python
+# ============================================================================
+# GLOBAL TIMEOUT CONFIGURATION
+# ============================================================================
+# Adjust these values if commands are timing out on your system.
+# All timeouts are in seconds.
+
+# Default timeout for quick commands (e.g., uname, cat, systemctl status)
+DEFAULT_TIMEOUT = 30
+
+# Timeout for short commands (e.g., firewall checks, simple queries)
+SHORT_TIMEOUT = 60
+
+# Timeout for medium commands (e.g., mmhealth, mmnetverify)
+MEDIUM_TIMEOUT = 120
+
+# Timeout for long commands (e.g., essstoragequickcheck, gnrhealthcheck)
+LONG_TIMEOUT = 300
+
+# Timeout for very long commands (e.g., mmlsfirmware on systems with many enclosures)
+VERY_LONG_TIMEOUT = 600
+```
+
+### Recommended Timeout Adjustments
+
+**For systems with many storage enclosures or older hardware:**
+```python
+VERY_LONG_TIMEOUT = 900    # Increase to 15 minutes (from 10 minutes)
+```
+
+**For very slow or heavily loaded systems:**
+```python
+DEFAULT_TIMEOUT = 60       # Increase to 60 seconds (from 30 seconds)
+SHORT_TIMEOUT = 120        # Increase to 2 minutes (from 1 minute)
+MEDIUM_TIMEOUT = 240       # Increase to 4 minutes (from 2 minutes)
+LONG_TIMEOUT = 600         # Increase to 10 minutes (from 5 minutes)
+VERY_LONG_TIMEOUT = 1200   # Increase to 20 minutes (from 10 minutes)
+```
+
+### Timeout Categories
+
+| Timeout Constant | Default Value | Used For |
+|------------------|---------------|----------|
+| `DEFAULT_TIMEOUT` | 30 seconds | Quick commands: uname, cat, systemctl, mmlscluster |
+| `SHORT_TIMEOUT` | 60 seconds | Short commands: mmnetverify, mmhealth |
+| `MEDIUM_TIMEOUT` | 120 seconds | Medium commands: system HAL checks |
+| `LONG_TIMEOUT` | 300 seconds | Long commands: essstoragequickcheck |
+| `VERY_LONG_TIMEOUT` | 600 seconds | Very long commands: mmlsfirmware, gnrhealthcheck |
+
+**Note:** After adjusting timeouts, save the file and re-run the health check.
+
 ## Sample Pre-check execution snippet**
 
 ```shell
