@@ -1806,7 +1806,7 @@ class HealthCheckManager:
         """
         try:
             executor = RemoteExecutor(ssh_context)
-            result = executor.execute_command("mmlscluster", timeout=DEFAULT_TIMEOUT)
+            result = executor.execute_command("/usr/lpp/mmfs/bin/mmlscluster", timeout=DEFAULT_TIMEOUT)
             output = result.get('stdout', '')
             
             nodes = {}
@@ -2494,7 +2494,7 @@ def main():
             print()
         
         # Get cluster information
-        mmlscluster_result = executor.execute_command("mmlscluster", timeout=DEFAULT_TIMEOUT)
+        mmlscluster_result = executor.execute_command("/usr/lpp/mmfs/bin/mmlscluster", timeout=DEFAULT_TIMEOUT)
         mmlscluster_out = mmlscluster_result.get('stdout', '').strip()
         mmlscluster_err = mmlscluster_result.get('stderr', '').strip()
         
