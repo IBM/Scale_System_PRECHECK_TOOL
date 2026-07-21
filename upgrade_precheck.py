@@ -33,8 +33,11 @@ MEDIUM_TIMEOUT = 120
 # Timeout for long commands (e.g., essstoragequickcheck, gnrhealthcheck)
 LONG_TIMEOUT = 300
 
-# Timeout for very long commands (e.g., mmlsfirmware on systems with many enclosures)
+# Timeout for very long commands (e.g., gnrhealthcheck)
 VERY_LONG_TIMEOUT = 600
+
+# Timeout for extremely long commands (e.g., mmlsfirmware on ESS x2 systems with many enclosures)
+EXTREMELY_LONG_TIMEOUT = 1200
 
 # ============================================================================
 
@@ -362,14 +365,111 @@ class ESSStorageQuickCheckHealthChecker(HealthChecker):
         )
 
     def check_health(self) -> HealthCheckResult:
-        # Build command with node list
-        if self.node_list:
-            node_str = ','.join(self.node_list)
-            cmd = f"{self.script_path} -N {node_str}"
+        """Check storage health by running essstoragequickcheck locally on each node"""
+        if not self.node_list:
+            return HealthCheckResult(
+                component=self.component_name,
+                status=HealthStatus.WARNING,
+                message="No IO nodes found to check",
+                details={"nodes": []},
+                resolution="Ensure IO nodes are properly configured in the cluster",
+                time_to_resolve="N/A",
+                can_upgrade=True
+            )
+
+        all_errors = []
+        all_warnings = []
+        all_info = []
+        nodes_checked = []
+        nodes_failed = []
+        combined_output = []
+
+        for node in self.node_list:
+            node_result = self._check_node_storage(node)
+            
+            if node_result["status"] == "error":
+                nodes_failed.append(node)
+                all_errors.extend(node_result["errors"])
+            else:
+                nodes_checked.append(node)
+                all_errors.extend(node_result["errors"])
+                all_warnings.extend(node_result["warnings"])
+                all_info.extend(node_result["info"])
+                combined_output.append(f"=== Node {node} ===\n{node_result['output']}")
+
+        # Determine overall status
+        if all_errors:
+            status = HealthStatus.CRITICAL
+            message = f"Found {len(all_errors)} error(s) in storage check across {len(nodes_checked)} node(s)"
+            can_upgrade = False
+        elif all_warnings:
+            status = HealthStatus.WARNING
+            message = f"Found {len(all_warnings)} warning(s) in storage check across {len(nodes_checked)} node(s)"
+            can_upgrade = True
+        elif nodes_checked:
+            status = HealthStatus.HEALTHY
+            message = f"All storage checks passed on {len(nodes_checked)} node(s)"
+            can_upgrade = True
         else:
-            cmd = self.script_path
+            status = HealthStatus.ERROR
+            message = f"Failed to check storage on all {len(nodes_failed)} node(s)"
+            can_upgrade = False
+
+        details = {
+            "nodes_checked": nodes_checked,
+            "nodes_failed": nodes_failed,
+            "errors": all_errors[:10],
+            "warnings": all_warnings[:10],
+            "combined_output": "\n\n".join(combined_output)
+        }
+
+        # Build resolution message
+        if all_errors:
+            resolution = (
+                "Critical storage issues detected. Review the following:\n"
+                + "\n".join(f"  - {err}" for err in all_errors[:5])
+            )
+        elif all_warnings:
+            resolution = (
+                "Storage warnings detected. Review the following:\n"
+                + "\n".join(f"  - {warn}" for warn in all_warnings[:5])
+            )
+        else:
+            resolution = "No action required."
+
+        return HealthCheckResult(
+            component=self.component_name,
+            status=status,
+            message=message,
+            details=details,
+            resolution=resolution,
+            time_to_resolve="5-30 minutes" if all_warnings or all_errors else "N/A",
+            can_upgrade=can_upgrade
+        )
+
+    def _check_node_storage(self, node: str) -> Dict[str, Any]:
+        """Check storage on a single node by running essstoragequickcheck locally"""
+        errors = []
+        warnings = []
+        info_lines = []
         
-        result = self._execute_command(cmd, timeout=LONG_TIMEOUT)
+        # Create a node-specific execution context to run command locally on the node
+        node_context = ExecutionContext(
+            context_type='ssh',
+            name=node,
+            host=node,
+            port=self.execution_context.port if self.execution_context else 22,
+            username=self.execution_context.username if self.execution_context else None,
+            password=self.execution_context.password if self.execution_context else None,
+            key_file=self.execution_context.key_file if self.execution_context else None
+        )
+        
+        # Run essstoragequickcheck locally on the node (no -N option)
+        cmd = self.script_path
+        
+        # Execute command on the specific node
+        node_executor = RemoteExecutor(node_context)
+        result = node_executor.execute_command(cmd, timeout=LONG_TIMEOUT)
         output = result.get('stdout', '')
         error = result.get('stderr', '')
         rc = result.get('returncode', -1)
@@ -378,74 +478,40 @@ class ESSStorageQuickCheckHealthChecker(HealthChecker):
         if error:
             filtered_err_lines = []
             for line in error.splitlines():
-                # Skip SSH host key warnings
                 if not ("Permanently added" in line and "to the list of known hosts" in line):
                     filtered_err_lines.append(line)
             error = '\n'.join(filtered_err_lines).strip()
         
+        if rc != 0 and not output:
+            error_msg = f"Node {node}: Failed to run essstoragequickcheck (rc={rc})"
+            if error:
+                error_msg += f" - {error}"
+            return {
+                "status": "error",
+                "errors": [error_msg],
+                "warnings": [],
+                "info": [],
+                "output": error_msg
+            }
+        
         # Parse output for errors and warnings
-        errors = []
-        warnings = []
-        info_lines = []
-        
         for line in output.splitlines():
-            # Temporary workaround to not consider non ess nodes
             if "Invalid node in the list" in line:
-                    continue
+                continue
             if "[ERROR]" in line:
-                errors.append(line)
+                errors.append(f"Node {node}: {line}")
             elif "[WARNING]" in line or "WARNING" in line:
-                warnings.append(line)
+                warnings.append(f"Node {node}: {line}")
             elif "[INFO]" in line:
-                info_lines.append(line)
+                info_lines.append(f"Node {node}: {line}")
         
-        # Determine status based on findings
-        if errors or "essstoragequickcheck detected error" in output:
-            status = HealthStatus.CRITICAL
-            message = f"Found {len(errors)} error(s) in storage check"
-        elif warnings:
-            status = HealthStatus.WARNING
-            message = f"Found {len(warnings)} warning(s) in storage check"
-        elif rc == 0 and "essstoragequickcheck passed successfully" in output:
-            status = HealthStatus.HEALTHY
-            message = "All storage checks passed successfully"
-        else:
-            status = HealthStatus.ERROR
-            message = error or "Unknown error during storage check"
-        
-        details = {
-            "stdout": output,
+        return {
+            "status": "ok",
             "errors": errors,
             "warnings": warnings,
-            "stderr": error,
-            "returncode": rc,
-            "command": cmd,
-            "nodes_checked": self.node_list
+            "info": info_lines,
+            "output": output
         }
-        
-        # Build resolution message
-        if errors:
-            resolution = (
-                "Critical storage issues detected. Review the following:\n"
-                + "\n".join(f"  - {err}" for err in errors[:5])  # Show only first 5 errors
-            )
-        elif warnings:
-            resolution = (
-                "Storage warnings detected. Review the following:\n"
-                + "\n".join(f"  - {warn}" for warn in warnings[:5])  # Show only first 5 warnings
-            )
-        else:
-            resolution = "No action required."
-        
-        return HealthCheckResult(
-            component=self.component_name,
-            status=status,
-            message=message,
-            details=details,
-            resolution=resolution + f"\n(Command executed: {cmd})",
-            time_to_resolve="5-30 minutes" if warnings or errors else "N/A",
-            can_upgrade=status == HealthStatus.HEALTHY
-        )
 
 class StorageFirmwareHealthChecker(HealthChecker):
     """Health checker for storage firmware (adapters, enclosures, drives) on IO nodes."""
@@ -594,9 +660,9 @@ class StorageFirmwareHealthChecker(HealthChecker):
         cmd = "/usr/lpp/mmfs/bin/mmlsfirmware --type storage-enclosure -Y"
         
         # Execute command on the specific node
-        # Increased timeout to 600 seconds (10 minutes) for older systems with many enclosures
+        # Increased timeout to 1200 seconds (20 minutes) for ESS x2 systems with many enclosures
         node_executor = RemoteExecutor(node_context)
-        result = node_executor.execute_command(cmd, timeout=VERY_LONG_TIMEOUT)
+        result = node_executor.execute_command(cmd, timeout=EXTREMELY_LONG_TIMEOUT)
         rc = result.get('returncode', -1)
         output = result.get('stdout', '')
         stderr = result.get('stderr', '')
@@ -710,11 +776,12 @@ class StorageFirmwareHealthChecker(HealthChecker):
 class MMNetVerifyHealthChecker(HealthChecker):
     """Health checker for mmnetverify network verification."""
 
-    def __init__(self, execution_context: Optional[ExecutionContext] = None):
+    def __init__(self, execution_context: Optional[ExecutionContext] = None, node_list: Optional[List[str]] = None):
         # Always use SSH context unless explicitly overridden
         if execution_context is None:
             execution_context = ExecutionContext(context_type='ssh')
         super().__init__(execution_context)
+        self.node_list = node_list or []
 
     @property
     def component_name(self) -> str:
@@ -722,48 +789,70 @@ class MMNetVerifyHealthChecker(HealthChecker):
 
     @property
     def description(self) -> str:
-        return "Checks network configuration and communication using mmnetverify."
+        return "Checks network configuration and communication using mmnetverify on each node."
 
     def check_health(self) -> HealthCheckResult:
         return self._safe_execute(self._check_mmnetverify)
 
     def _check_mmnetverify(self) -> HealthCheckResult:
-        mmnetverify_path = "/usr/lpp/mmfs/bin/mmnetverify"
-        cmd = f"{mmnetverify_path} -N all"
-        result = self._execute_command(command=cmd, timeout=SHORT_TIMEOUT)
-        output = result.get('stdout', '')
-        error = result.get('stderr', '')
-        rc = result.get('returncode', -1)
-        details = {"stdout": output, "stderr": error, "returncode": rc}
+        """Check network by running mmnetverify locally on each node"""
+        if not self.node_list:
+            return HealthCheckResult(
+                component=self.component_name,
+                status=HealthStatus.WARNING,
+                message="No nodes found to check",
+                details={"nodes": []},
+                resolution="Ensure nodes are properly configured in the cluster",
+                time_to_resolve="N/A",
+                can_upgrade=True
+            )
 
-        # Parse output for issues
-        issues = []
-        status = HealthStatus.HEALTHY
-        message = "mmnetverify completed successfully."
-        resolution = "No action required."
-        time_to_resolve = "N/A"
+        all_issues = []
+        nodes_checked = []
+        nodes_failed = []
+        nodes_with_issues = []
+        combined_output = []
 
-        if (rc != 0 or "Issues Found:" in output or
-                "Command failed" in output):
+        for node in self.node_list:
+            node_result = self._check_node_network(node)
+            
+            if node_result["status"] == "error":
+                nodes_failed.append(node)
+                all_issues.extend(node_result["issues"])
+            else:
+                nodes_checked.append(node)
+                if node_result["issues"]:
+                    nodes_with_issues.append(node)
+                    all_issues.extend(node_result["issues"])
+                combined_output.append(f"=== Node {node} ===\n{node_result['output']}")
+
+        # Determine overall status
+        if nodes_failed or nodes_with_issues:
             status = HealthStatus.CRITICAL
-            message = "mmnetverify found network issues or failed."
+            message = f"mmnetverify found network issues on {len(nodes_with_issues)} node(s), {len(nodes_failed)} node(s) failed"
             resolution = (
                 "Check mmnetverify output for details. "
                 "Ensure all nodes are reachable and services are running."
             )
             time_to_resolve = "Immediate action required."
-        elif "Fail" in output or "failed" in output:
-            status = HealthStatus.WARNING
-            message = "mmnetverify reported some failures."
-            resolution = "Review mmnetverify output and address reported failures."
-            time_to_resolve = "As soon as possible."
+        elif nodes_checked:
+            status = HealthStatus.HEALTHY
+            message = f"mmnetverify completed successfully on {len(nodes_checked)} node(s)"
+            resolution = "No action required."
+            time_to_resolve = "N/A"
+        else:
+            status = HealthStatus.ERROR
+            message = "Failed to check network on all nodes"
+            resolution = "Check SSH connectivity and node availability"
+            time_to_resolve = "Immediate action required."
 
-        # Optionally, extract specific issues
-        for line in output.splitlines():
-            if "Fail" in line or "failed" in line or "Error" in line:
-                issues.append(line)
-        if issues:
-            details["issues"] = issues
+        details = {
+            "nodes_checked": nodes_checked,
+            "nodes_failed": nodes_failed,
+            "nodes_with_issues": nodes_with_issues,
+            "issues": all_issues[:20],
+            "combined_output": "\n\n".join(combined_output)
+        }
 
         return HealthCheckResult(
             component=self.component_name,
@@ -775,14 +864,61 @@ class MMNetVerifyHealthChecker(HealthChecker):
             can_upgrade=False
         )
 
+    def _check_node_network(self, node: str) -> Dict[str, Any]:
+        """Check network on a single node by running mmnetverify locally"""
+        issues = []
+        
+        # Create a node-specific execution context
+        node_context = ExecutionContext(
+            context_type='ssh',
+            name=node,
+            host=node,
+            port=self.execution_context.port if self.execution_context else 22,
+            username=self.execution_context.username if self.execution_context else None,
+            password=self.execution_context.password if self.execution_context else None,
+            key_file=self.execution_context.key_file if self.execution_context else None
+        )
+        
+        # Run mmnetverify locally on the node (no -N option)
+        mmnetverify_path = "/usr/lpp/mmfs/bin/mmnetverify"
+        cmd = mmnetverify_path
+        
+        node_executor = RemoteExecutor(node_context)
+        result = node_executor.execute_command(cmd, timeout=SHORT_TIMEOUT)
+        output = result.get('stdout', '')
+        error = result.get('stderr', '')
+        rc = result.get('returncode', -1)
+        
+        if rc != 0 and not output:
+            error_msg = f"Node {node}: Failed to run mmnetverify (rc={rc})"
+            if error:
+                error_msg += f" - {error}"
+            return {
+                "status": "error",
+                "issues": [error_msg],
+                "output": error_msg
+            }
+        
+        # Parse output for issues
+        for line in output.splitlines():
+            if "Fail" in line or "failed" in line or "Error" in line or "Issues Found:" in line:
+                issues.append(f"Node {node}: {line}")
+        
+        return {
+            "status": "ok",
+            "issues": issues,
+            "output": output
+        }
+
 
 class GNRHealthChecker(HealthChecker):
     """Health checker for GNR (General Node Recovery) using gnrhealthcheck."""
-    def __init__(self, execution_context: Optional[ExecutionContext] = None):
+    def __init__(self, execution_context: Optional[ExecutionContext] = None, node_list: Optional[List[str]] = None):
         # Always use ssh context unless explicitly overridden
         if execution_context is None:
             execution_context = ExecutionContext(context_type='ssh')
         super().__init__(execution_context)
+        self.node_list = node_list or []
 
     @property
     def component_name(self) -> str:
@@ -790,32 +926,124 @@ class GNRHealthChecker(HealthChecker):
 
     @property
     def description(self) -> str:
-        return "Checks GNR health using gnrhealthcheck."
+        return "Checks GNR health using gnrhealthcheck on each node."
 
     def check_health(self) -> HealthCheckResult:
         return self._safe_execute(self._check_gnrhealth)
 
     def _check_gnrhealth(self) -> HealthCheckResult:  # pylint: disable=too-many-locals
+        """Check GNR health by running gnrhealthcheck locally on each node"""
+        if not self.node_list:
+            return HealthCheckResult(
+                component=self.component_name,
+                status=HealthStatus.WARNING,
+                message="No nodes found to check",
+                details={"nodes": []},
+                resolution="Ensure nodes are properly configured in the cluster",
+                time_to_resolve="N/A",
+                can_upgrade=True
+            )
+
+        all_issues = []
+        all_component_problems = []
+        nodes_checked = []
+        nodes_failed = []
+        nodes_with_issues = []
+        combined_output = []
+
+        for node in self.node_list:
+            node_result = self._check_node_gnr(node)
+            
+            if node_result["status"] == "error":
+                nodes_failed.append(node)
+                all_issues.extend(node_result["issues"])
+            else:
+                nodes_checked.append(node)
+                if node_result["issues"] or node_result["component_problems"]:
+                    nodes_with_issues.append(node)
+                all_issues.extend(node_result["issues"])
+                all_component_problems.extend(node_result["component_problems"])
+                combined_output.append(f"=== Node {node} ===\n{node_result['output']}")
+
+        # Determine overall status
+        if nodes_with_issues or nodes_failed:
+            status = HealthStatus.CRITICAL
+            message = f"gnrhealthcheck found issues on {len(nodes_with_issues)} node(s), {len(nodes_failed)} node(s) failed"
+            resolution = (
+                "Check gnrhealthcheck output for enclosure/component "
+                "problems and resolve hardware issues."
+            )
+            time_to_resolve = "Immediate action required."
+        elif nodes_checked:
+            status = HealthStatus.HEALTHY
+            message = f"gnrhealthcheck completed successfully on {len(nodes_checked)} node(s)"
+            resolution = "No action required."
+            time_to_resolve = "N/A"
+        else:
+            status = HealthStatus.ERROR
+            message = "Failed to check GNR health on all nodes"
+            resolution = "Check SSH connectivity and node availability"
+            time_to_resolve = "Immediate action required."
+
+        details = {
+            "nodes_checked": nodes_checked,
+            "nodes_failed": nodes_failed,
+            "nodes_with_issues": nodes_with_issues,
+            "issues": all_issues[:20],
+            "component_problems": all_component_problems[:20],
+            "combined_output": "\n\n".join(combined_output)
+        }
+
+        return HealthCheckResult(
+            component=self.component_name,
+            status=status,
+            message=message,
+            details=details,
+            resolution=resolution,
+            time_to_resolve=time_to_resolve,
+            can_upgrade=False
+        )
+
+    def _check_node_gnr(self, node: str) -> Dict[str, Any]:
+        """Check GNR health on a single node"""
+        issues = []
+        component_problems = []
+        
+        # Create a node-specific execution context
+        node_context = ExecutionContext(
+            context_type='ssh',
+            name=node,
+            host=node,
+            port=self.execution_context.port if self.execution_context else 22,
+            username=self.execution_context.username if self.execution_context else None,
+            password=self.execution_context.password if self.execution_context else None,
+            key_file=self.execution_context.key_file if self.execution_context else None
+        )
+        
+        # Run gnrhealthcheck locally on the node
         gnrhealth_path = "/usr/lpp/mmfs/bin/gnrhealthcheck"
-        result = self._execute_command(gnrhealth_path, timeout=VERY_LONG_TIMEOUT)
+        
+        node_executor = RemoteExecutor(node_context)
+        result = node_executor.execute_command(gnrhealth_path, timeout=VERY_LONG_TIMEOUT)
         output = result.get('stdout', '')
         error = result.get('stderr', '')
         rc = result.get('returncode', -1)
-        details = {"stdout": output, "stderr": error, "returncode": rc}
-
+        
+        if rc != 0 and not output:
+            error_msg = f"Node {node}: Failed to run gnrhealthcheck (rc={rc})"
+            if error:
+                error_msg += f" - {error}"
+            return {
+                "status": "error",
+                "issues": [error_msg],
+                "component_problems": [],
+                "output": error_msg
+            }
+        
         # Parse output for enclosure/component problems
-        status = HealthStatus.HEALTHY
-        message = "gnrhealthcheck completed successfully."
-        resolution = "No action required."
-        time_to_resolve = "N/A"
-        issues = []
-        enclosure_problem = False
-        component_problems = []
-
         for line in output.splitlines():
             if "Found enclosure problems." in line:
-                enclosure_problem = True
-                issues.append(line)
+                issues.append(f"Node {node}: {line}")
             line_starts = (
                 line.strip().startswith("dimm") or
                 line.strip().startswith("esm") or
@@ -824,32 +1052,97 @@ class GNRHealthChecker(HealthChecker):
             )
             line_contains = "ABSENT" in line or "NOTAVAIL" in line
             if line_starts and line_contains:
-                component_problems.append(line)
-            if any(word in line for word in ["ERROR", "Error", "FAILED", "Fail"]):
-                issues.append(line)
-            if "WARNING" in line or "Warning" in line:
-                issues.append(line)
+                component_problems.append(f"Node {node}: {line}")
+            if any(word in line for word in ["ERROR", "Error", "FAILED", "Fail", "WARNING", "Warning"]):
+                issues.append(f"Node {node}: {line}")
+        
+        return {
+            "status": "ok",
+            "issues": issues,
+            "component_problems": component_problems,
+            "output": output
+        }
 
-        error_keywords = ["ERROR", "Error", "FAILED", "Fail"]
-        has_errors = any(w in output for w in error_keywords)
-        if enclosure_problem or component_problems or rc != 0 or has_errors:
-            status = HealthStatus.CRITICAL
-            message = "gnrhealthcheck found enclosure/component issues or failed."
-            resolution = (
-                "Check gnrhealthcheck output for enclosure/component "
-                "problems and resolve hardware issues."
+
+class MMHealthChecker(HealthChecker):
+    """Health checker for Storage Scale System nodes."""
+    def __init__(self, execution_context: Optional[ExecutionContext] = None, node_list: Optional[List[str]] = None):
+        # Default using ssh unless specified
+        if execution_context is None:
+            execution_context = ExecutionContext(context_type='ssh')
+        super().__init__(execution_context)
+        self.node_list = node_list or []
+
+    @property
+    def component_name(self) -> str:
+        return "Storage Scale System Node Health (mmhealth)"
+
+    @property
+    def description(self) -> str:
+        return "Checks node health using mmhealth on each node."
+
+    def check_health(self) -> HealthCheckResult:
+        return self._safe_execute(self._check_mmhealth)
+
+    def _check_mmhealth(self) -> HealthCheckResult:  # pylint: disable=too-many-locals
+        """Check node health by running mmhealth locally on each node"""
+        if not self.node_list:
+            return HealthCheckResult(
+                component=self.component_name,
+                status=HealthStatus.WARNING,
+                message="No nodes found to check",
+                details={"nodes": []},
+                resolution="Ensure nodes are properly configured in the cluster",
+                time_to_resolve="N/A",
+                can_upgrade=True
             )
-            time_to_resolve = "Immediate action required."
-        elif any(w in output for w in ["WARNING", "Warning"]):
-            status = HealthStatus.WARNING
-            message = "gnrhealthcheck reported warnings."
-            resolution = "Review gnrhealthcheck output and address reported warnings."
-            time_to_resolve = "As soon as possible."
 
-        if issues:
-            details["issues"] = issues
-        if component_problems:
-            details["component_problems"] = component_problems
+        all_issues = []
+        all_unhealthy_components = []
+        nodes_checked = []
+        nodes_failed = []
+        nodes_with_issues = []
+        combined_output = []
+
+        for node in self.node_list:
+            node_result = self._check_node_health(node)
+            
+            if node_result["status"] == "error":
+                nodes_failed.append(node)
+                all_issues.extend(node_result["issues"])
+            else:
+                nodes_checked.append(node)
+                if node_result["unhealthy_components"]:
+                    nodes_with_issues.append(node)
+                all_issues.extend(node_result["issues"])
+                all_unhealthy_components.extend(node_result["unhealthy_components"])
+                combined_output.append(f"=== Node {node} ===\n{node_result['output']}")
+
+        # Determine overall status
+        if nodes_with_issues or nodes_failed:
+            status = HealthStatus.CRITICAL
+            message = f"mmhealth found unhealthy components on {len(nodes_with_issues)} node(s), {len(nodes_failed)} node(s) failed"
+            resolution = "Check mmhealth output for component issues and resolve them."
+            time_to_resolve = "Immediate action required."
+        elif nodes_checked:
+            status = HealthStatus.HEALTHY
+            message = f"All nodes healthy ({len(nodes_checked)} node(s) checked)"
+            resolution = "No action required."
+            time_to_resolve = "N/A"
+        else:
+            status = HealthStatus.ERROR
+            message = "Failed to check node health on all nodes"
+            resolution = "Check SSH connectivity and node availability"
+            time_to_resolve = "Immediate action required."
+
+        details = {
+            "nodes_checked": nodes_checked,
+            "nodes_failed": nodes_failed,
+            "nodes_with_issues": nodes_with_issues,
+            "unhealthy_components": all_unhealthy_components[:20],
+            "issues": all_issues[:20],
+            "combined_output": "\n\n".join(combined_output)
+        }
 
         return HealthCheckResult(
             component=self.component_name,
@@ -861,94 +1154,94 @@ class GNRHealthChecker(HealthChecker):
             can_upgrade=False
         )
 
-
-class MMHealthChecker(HealthChecker):
-    """Health checker for Storage Scale System nodes."""
-    def __init__(self, execution_context: Optional[ExecutionContext] = None):
-        # Default using ssh unless specified
-        if execution_context is None:
-            execution_context = ExecutionContext(context_type='ssh')
-        super().__init__(execution_context)
-
-    @property
-    def component_name(self) -> str:
-        return "Storage Scale System Node Health (mmhealth)"
-
-    @property
-    def description(self) -> str:
-        return "Checks node health using mmhealth (executed in VM)."
-
-    def check_health(self) -> HealthCheckResult:
-        return self._safe_execute(self._check_mmhealth)
-
-    def _check_mmhealth(self) -> HealthCheckResult:  # pylint: disable=too-many-locals
+    def _check_node_health(self, node: str) -> Dict[str, Any]:
+        """Check health on a single node"""
+        issues = []
+        unhealthy_components = []
+        
+        # Create a node-specific execution context
+        node_context = ExecutionContext(
+            context_type='ssh',
+            name=node,
+            host=node,
+            port=self.execution_context.port if self.execution_context else 22,
+            username=self.execution_context.username if self.execution_context else None,
+            password=self.execution_context.password if self.execution_context else None,
+            key_file=self.execution_context.key_file if self.execution_context else None
+        )
+        
+        # Run mmhealth locally on the node
         mmhealth_path = "/usr/lpp/mmfs/bin/mmhealth"
         cmd = f"{mmhealth_path} node show --unhealthy -a"
-        result = self._execute_command(cmd, timeout=SHORT_TIMEOUT)
+        
+        node_executor = RemoteExecutor(node_context)
+        result = node_executor.execute_command(cmd, timeout=SHORT_TIMEOUT)
         output = result.get('stdout', '')
         error = result.get('stderr', '')
         rc = result.get('returncode', -1)
-        details = {"stdout": output, "stderr": error, "returncode": rc, "command": cmd}
-
-        # Parse output for unhealthy states and extract component details
-        status = HealthStatus.HEALTHY
-        message = "All nodes healthy."
-        resolution = "No action required."
-        time_to_resolve = "N/A"
-        issues = []
-        unhealthy_components = []
+        
+        if rc != 0 and not output:
+            error_msg = f"Node {node}: Failed to run mmhealth (rc={rc})"
+            if error:
+                error_msg += f" - {error}"
+            return {
+                "status": "error",
+                "issues": [error_msg],
+                "unhealthy_components": [],
+                "output": error_msg
+            }
+        
+        # Parse output for unhealthy states
         unhealthy_keywords = ["DEGRADED", "CHECKING", "FAILED", "DEPEND"]
         in_table = False
         for line in output.splitlines():
+            # Look for the component table header
             if line.strip().startswith("Component") and "Status" in line:
                 in_table = True
+                logging.debug("Node %s: Found component table header", node)
                 continue
-            if in_table and line.strip() and not line.startswith("-"):
-                # Example: GUI DEGRADED 1 day ago
-                # time_not_in_sync(utility1-vm1-hs.gpfs.local),
-                # gui_refresh_task_failed
+            # Skip separator lines
+            if line.strip().startswith("-"):
+                continue
+            # Parse component lines in the table
+            if in_table and line.strip():
                 parts = line.split()
-                if len(parts) >= 4:
+                if len(parts) >= 2:
                     component = parts[0]
                     comp_status = parts[1]
-                    # The rest is status change and reasons
-                    reasons = " ".join(parts[3:])
+                    # Get reasons if available (skip "Status Change" column)
+                    reasons = " ".join(parts[3:]) if len(parts) > 3 else ""
+                    logging.debug("Node %s: Checking component=%s status=%s", node, component, comp_status)
                     if comp_status in unhealthy_keywords:
+                        logging.info("Node %s: Found unhealthy component: %s = %s", node, component, comp_status)
                         unhealthy_components.append({
+                            "node": node,
                             "component": component,
                             "status": comp_status,
                             "reasons": reasons.strip()
                         })
-                        issues.append(f"{component}: {comp_status} - {reasons.strip()}")
-            if not line.strip():
+                        issues.append(f"Node {node}: {component}: {comp_status} - {reasons.strip()}")
+            # Empty line ends the table
+            if in_table and not line.strip():
                 in_table = False
-        if rc != 0 or unhealthy_components:
-            status = HealthStatus.CRITICAL
-            message = "mmhealth found unhealthy components or failed."
-            resolution = "Check mmhealth output for component issues and resolve them."
-            time_to_resolve = "Immediate action required."
-        if unhealthy_components:
-            details["unhealthy_components"] = unhealthy_components
-        if issues:
-            details["issues"] = issues
-        return HealthCheckResult(
-            component=self.component_name,
-            status=status,
-            message=message,
-            details=details,
-            resolution=resolution + f" (Command executed: {cmd})",
-            time_to_resolve=time_to_resolve,
-            can_upgrade=False
-        )
+                logging.debug("Node %s: End of component table", node)
+        
+        return {
+            "status": "ok",
+            "issues": issues,
+            "unhealthy_components": unhealthy_components,
+            "output": output
+        }
 
 
 class SystemHALCheckHealthChecker(HealthChecker):
     """Health checker for system HAL using system_check."""
-    def __init__(self, execution_context: Optional[ExecutionContext] = None):
+    def __init__(self, execution_context: Optional[ExecutionContext] = None, node_list: Optional[List[str]] = None):
         # Always use ssh context unless explicitly overridden
         if execution_context is None:
             execution_context = ExecutionContext(context_type='ssh')
         super().__init__(execution_context)
+        self.node_list = node_list or []
 
     @property
     def component_name(self) -> str:
@@ -958,37 +1251,69 @@ class SystemHALCheckHealthChecker(HealthChecker):
     def description(self) -> str:
         return (
             "Checks system health using "
-            "/opt/ibm/ess/hal/bin/system_check -c all (executed in VM)."
+            "/opt/ibm/ess/hal/bin/system_check -c all on each node."
         )
 
     def check_health(self) -> HealthCheckResult:
         return self._safe_execute(self._check_systemhal)
 
     def _check_systemhal(self) -> HealthCheckResult:
-        system_check_path = "/opt/ibm/ess/hal/bin/system_check"
-        cmd = f"{system_check_path} -c all"
-        result = self._execute_command(cmd, timeout=MEDIUM_TIMEOUT)
-        output = result.get('stdout', '')
-        error = result.get('stderr', '')
-        rc = result.get('returncode', -1)
-        details = {"stdout": output, "stderr": error, "returncode": rc}
+        """Check system HAL by running system_check locally on each node"""
+        if not self.node_list:
+            return HealthCheckResult(
+                component=self.component_name,
+                status=HealthStatus.WARNING,
+                message="No nodes found to check",
+                details={"nodes": []},
+                resolution="Ensure nodes are properly configured in the cluster",
+                time_to_resolve="N/A",
+                can_upgrade=True
+            )
 
-        # Parse output for errors or failures
-        status = HealthStatus.HEALTHY
-        message = "system_check completed successfully."
-        resolution = "No action required."
-        time_to_resolve = "N/A"
-        issues = []
-        for line in output.splitlines():
-            if any(word in line for word in ["ERROR", "Error", "FAILED", "Fail"]):
-                issues.append(line)
-        if rc != 0 or issues:
+        all_issues = []
+        nodes_checked = []
+        nodes_failed = []
+        nodes_with_issues = []
+        combined_output = []
+
+        for node in self.node_list:
+            node_result = self._check_node_systemhal(node)
+            
+            if node_result["status"] == "error":
+                nodes_failed.append(node)
+                all_issues.extend(node_result["issues"])
+            else:
+                nodes_checked.append(node)
+                if node_result["issues"]:
+                    nodes_with_issues.append(node)
+                all_issues.extend(node_result["issues"])
+                combined_output.append(f"=== Node {node} ===\n{node_result['output']}")
+
+        # Determine overall status
+        if nodes_with_issues or nodes_failed:
             status = HealthStatus.CRITICAL
-            message = "system_check found errors or failed."
+            message = f"system_check found errors on {len(nodes_with_issues)} node(s), {len(nodes_failed)} node(s) failed"
             resolution = "Check system_check output for details and resolve reported errors."
             time_to_resolve = "Immediate action required."
-        if issues:
-            details["issues"] = issues
+        elif nodes_checked:
+            status = HealthStatus.HEALTHY
+            message = f"system_check completed successfully on {len(nodes_checked)} node(s)"
+            resolution = "No action required."
+            time_to_resolve = "N/A"
+        else:
+            status = HealthStatus.ERROR
+            message = "Failed to check system HAL on all nodes"
+            resolution = "Check SSH connectivity and node availability"
+            time_to_resolve = "Immediate action required."
+
+        details = {
+            "nodes_checked": nodes_checked,
+            "nodes_failed": nodes_failed,
+            "nodes_with_issues": nodes_with_issues,
+            "issues": all_issues[:20],
+            "combined_output": "\n\n".join(combined_output)
+        }
+
         return HealthCheckResult(
             component=self.component_name,
             status=status,
@@ -998,6 +1323,52 @@ class SystemHALCheckHealthChecker(HealthChecker):
             time_to_resolve=time_to_resolve,
             can_upgrade=False
         )
+
+    def _check_node_systemhal(self, node: str) -> Dict[str, Any]:
+        """Check system HAL on a single node"""
+        issues = []
+        
+        # Create a node-specific execution context
+        node_context = ExecutionContext(
+            context_type='ssh',
+            name=node,
+            host=node,
+            port=self.execution_context.port if self.execution_context else 22,
+            username=self.execution_context.username if self.execution_context else None,
+            password=self.execution_context.password if self.execution_context else None,
+            key_file=self.execution_context.key_file if self.execution_context else None
+        )
+        
+        # Run system_check locally on the node
+        system_check_path = "/opt/ibm/ess/hal/bin/system_check"
+        cmd = f"{system_check_path} -c all"
+        
+        node_executor = RemoteExecutor(node_context)
+        result = node_executor.execute_command(cmd, timeout=MEDIUM_TIMEOUT)
+        output = result.get('stdout', '')
+        error = result.get('stderr', '')
+        rc = result.get('returncode', -1)
+        
+        if rc != 0 and not output:
+            error_msg = f"Node {node}: Failed to run system_check (rc={rc})"
+            if error:
+                error_msg += f" - {error}"
+            return {
+                "status": "error",
+                "issues": [error_msg],
+                "output": error_msg
+            }
+        
+        # Parse output for errors or failures
+        for line in output.splitlines():
+            if any(word in line for word in ["ERROR", "Error", "FAILED", "Fail"]):
+                issues.append(f"Node {node}: {line}")
+        
+        return {
+            "status": "ok",
+            "issues": issues,
+            "output": output
+        }
 
 class NodeTypeVersionHealthChecker(HealthChecker):
     """Check node type and OS version compatibility for s6k nodes"""
@@ -1934,17 +2305,27 @@ class HealthCheckManager:
         # Get cluster nodes (returns dict of short_name -> full_daemon_name)
         cluster_nodes = self.get_cluster_nodes(ssh_context)
         
-        # Filter to get only IO nodes for essstoragequickcheck
+        if not cluster_nodes:
+            logging.warning("No cluster nodes found! Checkers will report 'No nodes found to check'")
+            logging.warning("This may indicate an issue with mmlscluster command or SSH connectivity")
+        
+        # Filter to get only IO nodes for essstoragequickcheck and storage firmware
         executor = RemoteExecutor(ssh_context)
         io_nodes = filter_io_nodes(cluster_nodes, executor)
         
-        # Get list of all short node names for FirewallHealthChecker
+        # Get list of all short node names for other checkers
         all_node_names = list(cluster_nodes.keys())
         
         logging.info("Total cluster nodes: %d, IO nodes: %d", len(cluster_nodes), len(io_nodes))
+        if all_node_names:
+            logging.info("Node names: %s", ', '.join(all_node_names))
+        else:
+            logging.error("No node names available - health checks will be limited")
         
         default_checkers = [
-            GNRHealthChecker(ssh_context),
+            GNRHealthChecker(ssh_context, node_list=all_node_names),
+            MMHealthChecker(ssh_context, node_list=all_node_names),
+            MMNetVerifyHealthChecker(ssh_context, node_list=all_node_names),
             NodeTypeVersionHealthChecker(ssh_context, cluster_nodes=cluster_nodes),
             ESSStorageQuickCheckHealthChecker(ssh_context, node_list=io_nodes),
             StorageFirmwareHealthChecker(ssh_context, node_list=io_nodes),
@@ -1953,7 +2334,7 @@ class HealthCheckManager:
         
         # Only add SystemHALCheckHealthChecker if NOT Storage Scale System 5000 or NOT BYOE
         if hal_check:
-            default_checkers.insert(1, SystemHALCheckHealthChecker(ssh_context))
+            default_checkers.insert(1, SystemHALCheckHealthChecker(ssh_context, node_list=all_node_names))
             logging.debug("SystemHALCheckHealthChecker registered")
         else:
             logging.debug("Skipping SystemHALCheckHealthChecker for Storage Scale System 5000")
@@ -2159,6 +2540,22 @@ class HealthCheckManager:
                 if result.upgrade_info:
                     report.append(f"  Upgrade: {result.upgrade_info}")
                 
+                # Add node information if available
+                if result.details:
+                    if 'nodes_with_issues' in result.details and result.details['nodes_with_issues']:
+                        nodes = result.details['nodes_with_issues']
+                        if isinstance(nodes, list):
+                            report.append(f"  Affected Nodes: {', '.join(nodes)}")
+                    elif 'nodes_failed' in result.details and result.details['nodes_failed']:
+                        nodes = result.details['nodes_failed']
+                        if isinstance(nodes, list):
+                            report.append(f"  Failed Nodes: {', '.join(nodes)}")
+                    
+                    if 'nodes_checked' in result.details and result.details['nodes_checked']:
+                        nodes = result.details['nodes_checked']
+                        if isinstance(nodes, list):
+                            report.append(f"  Nodes Checked: {', '.join(nodes)}")
+                
                 # Add detailed unnecessary ports information for Firewall checks
                 if result.component == "Firewall Status and Port Check":
                     if result.details and 'node_results' in result.details:
@@ -2222,6 +2619,22 @@ class HealthCheckManager:
                 if result.upgrade_info:
                     report.append(f"  Upgrade: {result.upgrade_info}")
                 
+                # Add node information if available
+                if result.details:
+                    if 'nodes_with_issues' in result.details and result.details['nodes_with_issues']:
+                        nodes = result.details['nodes_with_issues']
+                        if isinstance(nodes, list):
+                            report.append(f"  Affected Nodes: {', '.join(nodes)}")
+                    elif 'nodes_failed' in result.details and result.details['nodes_failed']:
+                        nodes = result.details['nodes_failed']
+                        if isinstance(nodes, list):
+                            report.append(f"  Failed Nodes: {', '.join(nodes)}")
+                    
+                    if 'nodes_checked' in result.details and result.details['nodes_checked']:
+                        nodes = result.details['nodes_checked']
+                        if isinstance(nodes, list):
+                            report.append(f"  Nodes Checked: {', '.join(nodes)}")
+                
                 # Add detailed unnecessary ports information for Firewall checks
                 if result.component == "Firewall Status and Port Check":
                     if result.details and 'node_results' in result.details:
@@ -2282,6 +2695,23 @@ class HealthCheckManager:
                 report.append(f"  Problem: {result.message}")
                 report.append(f"  Solution: {result.resolution}")
                 report.append(f"  Time: {result.time_to_resolve}")
+                
+                # Add node information if available
+                if result.details:
+                    if 'nodes_with_issues' in result.details and result.details['nodes_with_issues']:
+                        nodes = result.details['nodes_with_issues']
+                        if isinstance(nodes, list):
+                            report.append(f"  Affected Nodes: {', '.join(nodes)}")
+                    elif 'nodes_failed' in result.details and result.details['nodes_failed']:
+                        nodes = result.details['nodes_failed']
+                        if isinstance(nodes, list):
+                            report.append(f"  Failed Nodes: {', '.join(nodes)}")
+                    
+                    if 'nodes_checked' in result.details and result.details['nodes_checked']:
+                        nodes = result.details['nodes_checked']
+                        if isinstance(nodes, list):
+                            report.append(f"  Nodes Checked: {', '.join(nodes)}")
+                
                 report.append("")
 
         # System details section
@@ -2360,8 +2790,35 @@ class HealthCheckManager:
                     report.append(f"  Command: {result.details['command']}")
                     report.append("")
                 
-                # Show stdout with preserved formatting
-                if 'stdout' in result.details and result.details['stdout']:
+                # Show node information if available
+                if 'nodes_checked' in result.details and result.details['nodes_checked']:
+                    nodes = result.details['nodes_checked']
+                    if isinstance(nodes, list):
+                        report.append(f"  Nodes Checked: {', '.join(nodes)}")
+                if 'nodes_with_issues' in result.details and result.details['nodes_with_issues']:
+                    nodes = result.details['nodes_with_issues']
+                    if isinstance(nodes, list):
+                        report.append(f"  Nodes with Issues: {', '.join(nodes)}")
+                if 'nodes_failed' in result.details and result.details['nodes_failed']:
+                    nodes = result.details['nodes_failed']
+                    if isinstance(nodes, list):
+                        report.append(f"  Nodes Failed: {', '.join(nodes)}")
+                if any(k in result.details for k in ['nodes_checked', 'nodes_with_issues', 'nodes_failed']):
+                    report.append("")
+                
+                # Show combined output from all nodes (for per-node execution)
+                if 'combined_output' in result.details and result.details['combined_output']:
+                    report.append("  Command Output (All Nodes):")
+                    report.append("  " + "-" * 116)
+                    for line in result.details['combined_output'].splitlines():
+                        # Temporary workaround to not consider non ess nodes
+                        if "Invalid node in the list" in line:
+                            continue
+                        report.append(f"  {line}")
+                    report.append("  " + "-" * 116)
+                    report.append("")
+                # Show stdout with preserved formatting (for single execution)
+                elif 'stdout' in result.details and result.details['stdout']:
                     report.append("  Standard Output:")
                     report.append("  " + "-" * 116)
                     for line in result.details['stdout'].splitlines():
@@ -2524,9 +2981,8 @@ def main():
 
     # Register checks that can execute on utility
     manager.register_default_checkers(ssh_context)
-    # Register checks that can needs to be run from EMS VM
-    manager.register_checker(MMNetVerifyHealthChecker(ssh_context))
-    manager.register_checker(MMHealthChecker(ssh_context))
+    # Note: MMNetVerifyHealthChecker and MMHealthChecker are now registered
+    # in register_default_checkers() with node_list parameter
 
     results = manager.run_all_checks()
     print(manager.generate_report())
