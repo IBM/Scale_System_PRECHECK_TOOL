@@ -1195,15 +1195,21 @@ class MMHealthChecker(HealthChecker):
         unhealthy_keywords = ["DEGRADED", "CHECKING", "FAILED", "DEPEND"]
         in_table = False
         for line in output.splitlines():
+            # Look for the component table header
             if line.strip().startswith("Component") and "Status" in line:
                 in_table = True
                 continue
-            if in_table and line.strip() and not line.startswith("-"):
+            # Skip separator lines
+            if line.strip().startswith("-"):
+                continue
+            # Parse component lines in the table
+            if in_table and line.strip():
                 parts = line.split()
-                if len(parts) >= 4:
+                if len(parts) >= 2:
                     component = parts[0]
                     comp_status = parts[1]
-                    reasons = " ".join(parts[3:])
+                    # Get reasons if available (skip "Status Change" column)
+                    reasons = " ".join(parts[3:]) if len(parts) > 3 else ""
                     if comp_status in unhealthy_keywords:
                         unhealthy_components.append({
                             "node": node,
@@ -1212,7 +1218,8 @@ class MMHealthChecker(HealthChecker):
                             "reasons": reasons.strip()
                         })
                         issues.append(f"Node {node}: {component}: {comp_status} - {reasons.strip()}")
-            if not line.strip():
+            # Empty line ends the table
+            if in_table and not line.strip():
                 in_table = False
         
         return {
@@ -2294,6 +2301,10 @@ class HealthCheckManager:
         # Get cluster nodes (returns dict of short_name -> full_daemon_name)
         cluster_nodes = self.get_cluster_nodes(ssh_context)
         
+        if not cluster_nodes:
+            logging.warning("No cluster nodes found! Checkers will report 'No nodes found to check'")
+            logging.warning("This may indicate an issue with mmlscluster command or SSH connectivity")
+        
         # Filter to get only IO nodes for essstoragequickcheck and storage firmware
         executor = RemoteExecutor(ssh_context)
         io_nodes = filter_io_nodes(cluster_nodes, executor)
@@ -2302,6 +2313,10 @@ class HealthCheckManager:
         all_node_names = list(cluster_nodes.keys())
         
         logging.info("Total cluster nodes: %d, IO nodes: %d", len(cluster_nodes), len(io_nodes))
+        if all_node_names:
+            logging.info("Node names: %s", ', '.join(all_node_names))
+        else:
+            logging.error("No node names available - health checks will be limited")
         
         default_checkers = [
             GNRHealthChecker(ssh_context, node_list=all_node_names),
@@ -2521,6 +2536,22 @@ class HealthCheckManager:
                 if result.upgrade_info:
                     report.append(f"  Upgrade: {result.upgrade_info}")
                 
+                # Add node information if available
+                if result.details:
+                    if 'nodes_with_issues' in result.details and result.details['nodes_with_issues']:
+                        nodes = result.details['nodes_with_issues']
+                        if isinstance(nodes, list):
+                            report.append(f"  Affected Nodes: {', '.join(nodes)}")
+                    elif 'nodes_failed' in result.details and result.details['nodes_failed']:
+                        nodes = result.details['nodes_failed']
+                        if isinstance(nodes, list):
+                            report.append(f"  Failed Nodes: {', '.join(nodes)}")
+                    
+                    if 'nodes_checked' in result.details and result.details['nodes_checked']:
+                        nodes = result.details['nodes_checked']
+                        if isinstance(nodes, list):
+                            report.append(f"  Nodes Checked: {', '.join(nodes)}")
+                
                 # Add detailed unnecessary ports information for Firewall checks
                 if result.component == "Firewall Status and Port Check":
                     if result.details and 'node_results' in result.details:
@@ -2584,6 +2615,22 @@ class HealthCheckManager:
                 if result.upgrade_info:
                     report.append(f"  Upgrade: {result.upgrade_info}")
                 
+                # Add node information if available
+                if result.details:
+                    if 'nodes_with_issues' in result.details and result.details['nodes_with_issues']:
+                        nodes = result.details['nodes_with_issues']
+                        if isinstance(nodes, list):
+                            report.append(f"  Affected Nodes: {', '.join(nodes)}")
+                    elif 'nodes_failed' in result.details and result.details['nodes_failed']:
+                        nodes = result.details['nodes_failed']
+                        if isinstance(nodes, list):
+                            report.append(f"  Failed Nodes: {', '.join(nodes)}")
+                    
+                    if 'nodes_checked' in result.details and result.details['nodes_checked']:
+                        nodes = result.details['nodes_checked']
+                        if isinstance(nodes, list):
+                            report.append(f"  Nodes Checked: {', '.join(nodes)}")
+                
                 # Add detailed unnecessary ports information for Firewall checks
                 if result.component == "Firewall Status and Port Check":
                     if result.details and 'node_results' in result.details:
@@ -2644,6 +2691,23 @@ class HealthCheckManager:
                 report.append(f"  Problem: {result.message}")
                 report.append(f"  Solution: {result.resolution}")
                 report.append(f"  Time: {result.time_to_resolve}")
+                
+                # Add node information if available
+                if result.details:
+                    if 'nodes_with_issues' in result.details and result.details['nodes_with_issues']:
+                        nodes = result.details['nodes_with_issues']
+                        if isinstance(nodes, list):
+                            report.append(f"  Affected Nodes: {', '.join(nodes)}")
+                    elif 'nodes_failed' in result.details and result.details['nodes_failed']:
+                        nodes = result.details['nodes_failed']
+                        if isinstance(nodes, list):
+                            report.append(f"  Failed Nodes: {', '.join(nodes)}")
+                    
+                    if 'nodes_checked' in result.details and result.details['nodes_checked']:
+                        nodes = result.details['nodes_checked']
+                        if isinstance(nodes, list):
+                            report.append(f"  Nodes Checked: {', '.join(nodes)}")
+                
                 report.append("")
 
         # System details section
@@ -2722,8 +2786,29 @@ class HealthCheckManager:
                     report.append(f"  Command: {result.details['command']}")
                     report.append("")
                 
-                # Show stdout with preserved formatting
-                if 'stdout' in result.details and result.details['stdout']:
+                # Show node information if available
+                if 'nodes_checked' in result.details and result.details['nodes_checked']:
+                    report.append(f"  Nodes Checked: {', '.join(result.details['nodes_checked'])}")
+                if 'nodes_with_issues' in result.details and result.details['nodes_with_issues']:
+                    report.append(f"  Nodes with Issues: {', '.join(result.details['nodes_with_issues'])}")
+                if 'nodes_failed' in result.details and result.details['nodes_failed']:
+                    report.append(f"  Nodes Failed: {', '.join(result.details['nodes_failed'])}")
+                if any(k in result.details for k in ['nodes_checked', 'nodes_with_issues', 'nodes_failed']):
+                    report.append("")
+                
+                # Show combined output from all nodes (for per-node execution)
+                if 'combined_output' in result.details and result.details['combined_output']:
+                    report.append("  Command Output (All Nodes):")
+                    report.append("  " + "-" * 116)
+                    for line in result.details['combined_output'].splitlines():
+                        # Temporary workaround to not consider non ess nodes
+                        if "Invalid node in the list" in line:
+                            continue
+                        report.append(f"  {line}")
+                    report.append("  " + "-" * 116)
+                    report.append("")
+                # Show stdout with preserved formatting (for single execution)
+                elif 'stdout' in result.details and result.details['stdout']:
                     report.append("  Standard Output:")
                     report.append("  " + "-" * 116)
                     for line in result.details['stdout'].splitlines():
@@ -2886,9 +2971,8 @@ def main():
 
     # Register checks that can execute on utility
     manager.register_default_checkers(ssh_context)
-    # Register checks that can needs to be run from EMS VM
-    manager.register_checker(MMNetVerifyHealthChecker(ssh_context))
-    manager.register_checker(MMHealthChecker(ssh_context))
+    # Note: MMNetVerifyHealthChecker and MMHealthChecker are now registered
+    # in register_default_checkers() with node_list parameter
 
     results = manager.run_all_checks()
     print(manager.generate_report())
