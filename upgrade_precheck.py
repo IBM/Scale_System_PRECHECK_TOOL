@@ -416,6 +416,7 @@ class ESSStorageQuickCheckHealthChecker(HealthChecker):
             can_upgrade = False
 
         details = {
+            "command": f"{self.script_path} (run locally on each IO node)",
             "nodes_checked": nodes_checked,
             "nodes_failed": nodes_failed,
             "errors": all_errors[:10],
@@ -847,6 +848,7 @@ class MMNetVerifyHealthChecker(HealthChecker):
             time_to_resolve = "Immediate action required."
 
         details = {
+            "command": "mmnetverify (run locally on each node)",
             "nodes_checked": nodes_checked,
             "nodes_failed": nodes_failed,
             "nodes_with_issues": nodes_with_issues,
@@ -986,6 +988,7 @@ class GNRHealthChecker(HealthChecker):
             time_to_resolve = "Immediate action required."
 
         details = {
+            "command": "gnrhealthcheck (run locally on each node)",
             "nodes_checked": nodes_checked,
             "nodes_failed": nodes_failed,
             "nodes_with_issues": nodes_with_issues,
@@ -1136,6 +1139,7 @@ class MMHealthChecker(HealthChecker):
             time_to_resolve = "Immediate action required."
 
         details = {
+            "command": "mmhealth node show --unhealthy -a (run locally on each node)",
             "nodes_checked": nodes_checked,
             "nodes_failed": nodes_failed,
             "nodes_with_issues": nodes_with_issues,
@@ -1307,6 +1311,7 @@ class SystemHALCheckHealthChecker(HealthChecker):
             time_to_resolve = "Immediate action required."
 
         details = {
+            "command": "system_check -c all (run locally on each node)",
             "nodes_checked": nodes_checked,
             "nodes_failed": nodes_failed,
             "nodes_with_issues": nodes_with_issues,
