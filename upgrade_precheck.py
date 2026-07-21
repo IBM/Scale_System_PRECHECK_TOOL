@@ -1198,6 +1198,7 @@ class MMHealthChecker(HealthChecker):
             # Look for the component table header
             if line.strip().startswith("Component") and "Status" in line:
                 in_table = True
+                logging.debug("Node %s: Found component table header", node)
                 continue
             # Skip separator lines
             if line.strip().startswith("-"):
@@ -1210,7 +1211,9 @@ class MMHealthChecker(HealthChecker):
                     comp_status = parts[1]
                     # Get reasons if available (skip "Status Change" column)
                     reasons = " ".join(parts[3:]) if len(parts) > 3 else ""
+                    logging.debug("Node %s: Checking component=%s status=%s", node, component, comp_status)
                     if comp_status in unhealthy_keywords:
+                        logging.info("Node %s: Found unhealthy component: %s = %s", node, component, comp_status)
                         unhealthy_components.append({
                             "node": node,
                             "component": component,
@@ -1221,6 +1224,7 @@ class MMHealthChecker(HealthChecker):
             # Empty line ends the table
             if in_table and not line.strip():
                 in_table = False
+                logging.debug("Node %s: End of component table", node)
         
         return {
             "status": "ok",
@@ -2788,11 +2792,17 @@ class HealthCheckManager:
                 
                 # Show node information if available
                 if 'nodes_checked' in result.details and result.details['nodes_checked']:
-                    report.append(f"  Nodes Checked: {', '.join(result.details['nodes_checked'])}")
+                    nodes = result.details['nodes_checked']
+                    if isinstance(nodes, list):
+                        report.append(f"  Nodes Checked: {', '.join(nodes)}")
                 if 'nodes_with_issues' in result.details and result.details['nodes_with_issues']:
-                    report.append(f"  Nodes with Issues: {', '.join(result.details['nodes_with_issues'])}")
+                    nodes = result.details['nodes_with_issues']
+                    if isinstance(nodes, list):
+                        report.append(f"  Nodes with Issues: {', '.join(nodes)}")
                 if 'nodes_failed' in result.details and result.details['nodes_failed']:
-                    report.append(f"  Nodes Failed: {', '.join(result.details['nodes_failed'])}")
+                    nodes = result.details['nodes_failed']
+                    if isinstance(nodes, list):
+                        report.append(f"  Nodes Failed: {', '.join(nodes)}")
                 if any(k in result.details for k in ['nodes_checked', 'nodes_with_issues', 'nodes_failed']):
                     report.append("")
                 
