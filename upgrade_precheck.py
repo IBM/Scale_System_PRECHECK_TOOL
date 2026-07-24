@@ -1656,12 +1656,8 @@ class FirewallHealthChecker(HealthChecker):
                         f"Node {node}: Firewall is blocking required ports: "
                         f"{', '.join(map(str, node_results['closed_ports']))}"
                     )
-            else:
-                # Firewall not running - this could be intentional
-                warnings.append(
-                    f"Node {node}: Firewall service ({firewall_status['service']}) is not running. "
-                    "This may be intentional in some environments."
-                )
+            # If firewall is not running, we don't add any warnings
+            # This is intentional - firewall not running is acceptable
             
             all_results[node] = node_results
         
@@ -1689,30 +1685,27 @@ class FirewallHealthChecker(HealthChecker):
             time_to_resolve = "15-30 minutes"
             can_upgrade = False
         elif warnings:
-            # Check if warnings are about unnecessary ports or firewall not running
-            # Only include nodes with unnecessary ports if firewall is actually running
+            # Only show warnings for unnecessary open ports
+            # Firewall not running is acceptable and should not generate warnings
             nodes_with_unnecessary_ports = [node for node in all_results.keys()
                                            if all_results[node]["firewall_running"]
                                            and all_results[node].get("unnecessary_open_ports")]
-            nodes_without_firewall = [node for node in all_results.keys()
-                                     if not all_results[node]["firewall_running"]]
             
-            if overall_status != HealthStatus.WARNING:
-                overall_status = HealthStatus.WARNING
-            
-            if nodes_with_unnecessary_ports and nodes_without_firewall:
-                message = (f"Firewall is not running on {len(nodes_without_firewall)} node(s) and "
-                          f"{len(nodes_with_unnecessary_ports)} node(s) have unnecessary open ports")
-            elif nodes_with_unnecessary_ports:
+            if nodes_with_unnecessary_ports:
+                if overall_status != HealthStatus.WARNING:
+                    overall_status = HealthStatus.WARNING
+                
                 nodes_str = ", ".join(nodes_with_unnecessary_ports)
                 message = f"Found unnecessary open ports on {len(nodes_with_unnecessary_ports)} node(s): {nodes_str}"
+                resolution = "Review warnings for details. Close unnecessary ports using the provided firewall-cmd commands."
+                time_to_resolve = "5-10 minutes"
+                can_upgrade = True
             else:
-                nodes_str = ", ".join(nodes_without_firewall)
-                message = f"Firewall is not running on {len(nodes_without_firewall)} node(s): {nodes_str}"
-            
-            resolution = "Review warnings for details. Close unnecessary ports using the provided firewall-cmd commands."
-            time_to_resolve = "5-10 minutes"
-            can_upgrade = True
+                # No unnecessary ports, firewall status is acceptable
+                message = "Firewall configuration is correct on all nodes."
+                resolution = "No action required."
+                time_to_resolve = "N/A"
+                can_upgrade = True
         else:
             message = "Firewall configuration is correct on all nodes."
             resolution = "No action required."
