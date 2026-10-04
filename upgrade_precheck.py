@@ -837,16 +837,19 @@ class MMNetVerifyHealthChecker(HealthChecker):
                 "Ensure all nodes are reachable and services are running."
             )
             time_to_resolve = "Immediate action required."
+            can_upgrade = False
         elif nodes_checked:
             status = HealthStatus.HEALTHY
             message = f"mmnetverify completed successfully on {len(nodes_checked)} node(s)"
             resolution = "No action required."
             time_to_resolve = "N/A"
+            can_upgrade = True
         else:
             status = HealthStatus.ERROR
             message = "Failed to check network on all nodes"
             resolution = "Check SSH connectivity and node availability"
             time_to_resolve = "Immediate action required."
+            can_upgrade = False
 
         details = {
             "command": "mmnetverify (run locally on each node)",
@@ -864,7 +867,7 @@ class MMNetVerifyHealthChecker(HealthChecker):
             details=details,
             resolution=resolution,
             time_to_resolve=time_to_resolve,
-            can_upgrade=False
+            can_upgrade=can_upgrade
         )
 
     def _check_node_network(self, node: str) -> Dict[str, Any]:
@@ -977,16 +980,19 @@ class GNRHealthChecker(HealthChecker):
                 "problems and resolve hardware issues."
             )
             time_to_resolve = "Immediate action required."
+            can_upgrade = False
         elif nodes_checked:
             status = HealthStatus.HEALTHY
             message = f"gnrhealthcheck completed successfully on {len(nodes_checked)} node(s)"
             resolution = "No action required."
             time_to_resolve = "N/A"
+            can_upgrade = True
         else:
             status = HealthStatus.ERROR
             message = "Failed to check GNR health on all nodes"
             resolution = "Check SSH connectivity and node availability"
             time_to_resolve = "Immediate action required."
+            can_upgrade = False
 
         details = {
             "command": "gnrhealthcheck --local (run locally on each node)",
@@ -1005,7 +1011,7 @@ class GNRHealthChecker(HealthChecker):
             details=details,
             resolution=resolution,
             time_to_resolve=time_to_resolve,
-            can_upgrade=False
+            can_upgrade=can_upgrade
         )
 
     def _check_node_gnr(self, node: str) -> Dict[str, Any]:
@@ -1187,11 +1193,13 @@ class MMHealthChecker(HealthChecker):
             message = f"mmhealth found {len(unhealthy_components)} unhealthy component(s)"
             resolution = "Check mmhealth output for component issues and resolve them."
             time_to_resolve = "Immediate action required."
+            can_upgrade = False
         else:
             status = HealthStatus.HEALTHY
             message = "All nodes healthy"
             resolution = "No action required."
             time_to_resolve = "N/A"
+            can_upgrade = True
         
         details = {
             "command": f"{cmd} (run from node {node})",
@@ -1210,7 +1218,7 @@ class MMHealthChecker(HealthChecker):
             details=details,
             resolution=resolution,
             time_to_resolve=time_to_resolve,
-            can_upgrade=False
+            can_upgrade=can_upgrade
         )
 
 
@@ -1286,6 +1294,7 @@ class SystemHALCheckHealthChecker(HealthChecker):
         message = "system_check completed successfully."
         resolution = "No action required."
         time_to_resolve = "N/A"
+        can_upgrade = True
         issues = []
         for line in output.splitlines():
             if any(word in line for word in ["ERROR", "Error", "FAILED", "Fail"]):
@@ -1295,6 +1304,7 @@ class SystemHALCheckHealthChecker(HealthChecker):
             message = "system_check found errors or failed."
             resolution = "Check system_check output for details and resolve reported errors."
             time_to_resolve = "Immediate action required."
+            can_upgrade = False
         if issues:
             details["issues"] = issues
         return HealthCheckResult(
@@ -1304,7 +1314,7 @@ class SystemHALCheckHealthChecker(HealthChecker):
             details=details,
             resolution=resolution,
             time_to_resolve=time_to_resolve,
-            can_upgrade=False
+            can_upgrade=can_upgrade
         )
 
 class NodeTypeVersionHealthChecker(HealthChecker):
